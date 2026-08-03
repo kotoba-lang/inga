@@ -105,11 +105,30 @@ runtime kotobase deploys on. `inga.parity` runs `head` / `fuel` / `power` /
 head:70/3/false/false fuel:10,/3,3,6/0,0 power:100/1/1/true/4 ref:true/false,cid-1/true,1/cid-2
 ```
 
-**`inga.state` is not covered by parity, and that is a real gap, not an
-omission.** `arrangement/commit!` returns a CID on the JVM and a `js/Promise`
-on cljs, so there is no single synchronous digest to compare. The split is
-documented in `inga.state`'s docstring rather than papered over; verifying its
-cljs path needs arrangement's own cljs deps and is open work.
+`inga.state` is not in the parity digest — `arrangement/commit!` returns a CID
+on the JVM and a `js/Promise` on cljs, so there is no single synchronous value
+to compare. It is covered instead by the full cljs suite:
+
+```bash
+npm run test:cljs   # shadow-cljs :node-test -- 247 tests, 1204 assertions
+```
+
+**Both runtimes run the same 247 tests.** That includes every namespace that
+came from engi, which had no cljs suite for them.
+
+Two things only the cljs build could find, both while the JVM suite was green:
+
+- **nbb cannot run `inga.state` at all** — SCI dies with `Protocol not found:
+  IEquiv` inside a transitive dependency. shadow-cljs is the compiler kotobase
+  actually deploys with, so that is the vehicle; nbb still runs `inga.parity`.
+- **arrangement's platform split is not only in what it returns.** On cljs it
+  also expects `blind-fn` / `encrypt-fn` / `decrypt-fn` to return Promises.
+  Passing the JVM-shaped synchronous seams fails inside arrangement with
+  `.then is not a function`.
+
+Where this lands in production: `inga.replica/state-root` is **reporting**, not
+a consensus decision — no adopt or commit path reads it — so a Promise there is
+a caller's `await`, not a protocol break.
 
 The acceptance test is **kotobase's own conformance suite**, not one written
 here:
@@ -295,8 +314,7 @@ from the consensus set, which is why the cut was clean — but it also means
 inga's consumer today is the torihiki harness, not the ENGI ledger. Running
 ENGI/EN *on* inga is future work.
 
-Still open, from the same ADR: `inga.state`'s cljs path is unverified;
-`:storage` power has no retrieval-sampling implementation; the `.kotoba`
+Still open, from the same ADR: `:storage` power has no retrieval-sampling implementation; the `.kotoba`
 machine body is blocked on the compiler; bond collateral is not deployed, so
 **slashing is implemented and does not fire**; equivocation evidence is
 recorded and does not propagate.

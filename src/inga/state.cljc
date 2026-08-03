@@ -51,9 +51,21 @@
   Promise path is the important one and a caller that treats the return as a
   string will get `#object[Promise]` in its state root and agree with nobody.
 
+  The split is not only in the return value: on cljs, arrangement also expects
+  `blind-fn` / `encrypt-fn` / `decrypt-fn` to RETURN Promises. Passing the
+  JVM-shaped synchronous seams fails inside arrangement with `.then is not a
+  function`, and only the cljs build says so.
+
   `inga.head`, `inga.ref`, `inga.fuel` and `inga.power` are pure and
   synchronous on both runtimes — `inga.parity` runs them on JVM and nbb and
-  checks one digest. `inga.state` is the namespace where the split lives.
+  checks one digest. `inga.state` is the namespace where the split lives, and
+  it is covered by the shadow-cljs suite instead (`npm run test:cljs`), which
+  runs the same 247 tests the JVM does. nbb cannot host it: SCI raises
+  `Protocol not found: IEquiv` inside a transitive dependency.
+
+  Where the split lands in production: `inga.replica/state-root` is REPORTING
+  — no adopt or commit path reads it — so a Promise there is a caller's
+  `await`, not a protocol break.
 
   ## Fuel
 

@@ -1,0 +1,5 @@
+{:source-paths ["test" "src" "/Users/junkawasaki/.gitlibs/libs/io.github.kotoba-lang/arrangement/096523fb2d57b57d89da88a47c07e6bc008c2285/src" "/Users/junkawasaki/.gitlibs/libs/io.github.kotoba-lang/kotobase-storage/f41e7bd3dfc8547614c6adc843c9d5fd1290687f/src" "/Users/junkawasaki/.gitlibs/libs/io.github.kotoba-lang/datalog/9db8410608195f76c082a9a627bf8c31feaa4294/src" "/Users/junkawasaki/.gitlibs/libs/io.github.kotoba-lang/datom-source/32fd54f091348dab3c78bee765bb7214a056488d/src" "/Users/junkawasaki/.gitlibs/libs/io.github.kotoba-lang/io-ipld/e08dc3b2ab705be292e388cd1ad136381544a041/src" "/Users/junkawasaki/.gitlibs/libs/io.github.kotoba-lang/prolly-tree/9abe8fd19d309a2d056283e5bfeafe030e05e42a/src" "/Users/junkawasaki/.gitlibs/libs/io.github.kotoba-lang/io-multiformats/eec3ee85c458ea830be94518b9a42f4a8f1aee40/src" "/Users/junkawasaki/.gitlibs/libs/io.github.kotoba-lang/org-ietf-cbor/de18ad29102f9df150e214d756de4719c3c00d7a/src"]
+ :builds
+ {:test {:target :node-test
+         :output-to "out/test.cjs"
+         :ns-regexp "-test$"}}}
