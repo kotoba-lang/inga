@@ -199,15 +199,27 @@ not obliged to become datoms to reach consensus). `assert-hydratable!` refuses
 "F1 must come before D6" from something a reader remembers into something the
 code holds.
 
-Acceptance test, as the ADR stated it — four replicas reach the same CID **and
-the state hydrated from that CID answers Datalog**:
+Acceptance, as the ADR stated it — four replicas reach the same CID **and the
+state hydrated from that CID answers Datalog**. Two levels, because the first
+alone was not what the ADR promised:
+
+**Standalone** — four folds of the same op list produce one root, so the root
+is a function of the data:
 
 ```clojure
-(is (= 1 (count (set roots))))                     ; one root across four runs
-(let [restored ((:hydrate-fn m) root identity)]    ; a reader with only the CID
+(is (= 1 (count (set roots))))
+(let [restored ((:hydrate-fn m) root uncrypt)]     ; a reader with only the CID
   (state/query restored {:find '[?s] :where '[[?s "role" "witness"]]}))
 ;; => #{["alice"] ["bob"]}
 ```
+
+**Through the consensus** (`four-replicas-that-had-to-agree-reach-a-hydratable-root`)
+— four replicas that had to vote their way to a committed prefix, then
+recomputed at a common height and hydrated. Folding four times proves the root
+is deterministic; it does not prove replicas that had to *agree* on an order
+arrive at one. The socket harnesses do go through a commit rule, and their
+machine is an opaque digest — exactly what F1 replaced. So this half was
+covered twice and joined nowhere until now.
 
 ### F2 — running out of fuel is a state transition, not an exception
 

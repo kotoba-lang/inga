@@ -6,11 +6,14 @@
   and a suite full of correct parts is exactly what a system that has never
   run looks like."
   (:require [clojure.test :refer [deftest is testing]]
+            #?(:cljs [clojure.test :refer [async]])
             [inga.replica :as r]
             [inga.attest :as att]
             [inga.consensus :as c]
             [inga.pacemaker :as pm]
             [inga.quorum :as q]
+            [inga.state :as state]
+            [inga.state-test :as state-test]
             [clojure.string]
             [inga.stake :as stake]
             [inga.sync :as sync]))
@@ -1012,3 +1015,80 @@
             (r/replica {:witness :w1 :witnesses [:w1 :w2 :w3 :w4]
                         :quorum (q/stake-weighted {"w1" {:amount 1}} #{"w1"})
                         :hash-fn hash-fn}))))))
+
+;; ── F1 through the consensus, not beside it ──────────────────────────────────
+;;
+;; `inga.state`'s acceptance ran the CID machine STANDALONE: four folds of the
+;; same op list, one root. That shows the root is a function of the data. It
+;; does not show the thing the ADR actually promised — that four replicas
+;; which had to AGREE on an order arrive at a hydratable root — because
+;; nothing in it went through a commit rule. The socket harnesses do go
+;; through one, and their machine is an opaque digest, which is exactly what
+;; F1 replaced. So this half was covered twice and joined nowhere.
+
+(def ^:private ops-per-block
+  {"op-a" [{:op :assert :s "alice" :p "role" :o "witness"}]
+   "op-b" [{:op :assert :s "bob" :p "role" :o "witness"}]
+   "op-c" [{:op :assert :s "alice" :p "stake" :o 100}]})
+
+(defn- cid-net
+  "A network whose machine is `inga.state`'s, over one shared block store —
+  which is the real topology: blocks are immutable and CID-addressed, so two
+  replicas producing the same block produce the same bytes at one address."
+  [blocks]
+  (let [machine (state/machine
+                 {:decode-block (fn [b] (mapcat ops-per-block (:inga.block/proposals b)))
+                  :put! (fn [cid bytes] (swap! blocks assoc cid bytes))
+                  :get-fn (fn [cid] (get @blocks cid))
+                  :blind-fn state-test/blind
+                  :encrypt-fn state-test/crypt})]
+    [machine
+     (into {} (for [w witnesses]
+                [w (r/replica {:witness w :witnesses (vec witnesses)
+                               :quorum (c/quorum-size (count witnesses))
+                               :hash-fn hash-fn :machine machine})]))]))
+
+(defn- roots-at-common-height
+  "Each replica's root recomputed from the first `common` committed blocks.
+  Comparing as-of-now would fail because replicas are legitimately a block or
+  two apart, for reasons that have nothing to do with agreement."
+  [machine rs]
+  (let [states (vals rs)
+        common (apply min (map #(count (:committed %)) states))]
+    [common
+     (mapv (fn [s]
+             ((:root-fn machine)
+              (reduce (:apply-fn machine) ((:init-fn machine))
+                      (take common (:committed s)))))
+           states)]))
+
+(deftest four-replicas-that-had-to-agree-reach-a-hydratable-root
+  (let [blocks (atom {})
+        [machine rs0] (cid-net blocks)
+        leader (c/leader-for (vec witnesses) 1)
+        seeded (update rs0 leader #(-> % (r/submit "op-a") (r/submit "op-b") (r/submit "op-c")))
+        [s0 out] (r/start (get seeded leader) 1000)
+        rs1 (assoc seeded leader s0)
+        [rs _ _] (deliver-all rs1 (mapv #(assoc % :from leader) out) 1000 4000)
+        [common roots] (roots-at-common-height machine rs)
+        check (fn [cids]
+                (is (pos? common) "the network actually committed something")
+                (is (= 1 (count (set cids)))
+                    "every replica that voted its way to this prefix holds one root")
+                (is (re-find #"^b" (first cids)) "and it is a CID"))]
+    #?(:clj (do (check roots)
+                (testing "and a party holding only that CID can query it"
+                  (let [restored ((:hydrate-fn machine) (first roots) state-test/uncrypt)]
+                    (is (contains? (state/query restored
+                                                {:find '[?s] :where '[[?s "role" "witness"]]})
+                                   ["alice"])))))
+       :cljs (async done
+               (-> (js/Promise.all (clj->js roots))
+                   (.then (fn [cids]
+                            (check (vec cids))
+                            ((:hydrate-fn machine) (first cids) state-test/uncrypt)))
+                   (.then (fn [restored]
+                            (is (contains? (state/query restored
+                                                        {:find '[?s] :where '[[?s "role" "witness"]]})
+                                           ["alice"]))
+                            (done))))))))
