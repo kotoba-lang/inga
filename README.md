@@ -320,6 +320,11 @@ genuinely cannot do — making the bonds map a function of the committed prefix.
 nbb --classpath "src:<torihiki>/src:<bytes>/src" script/torihiki-on-inga.cljs
 ```
 
+`RUN_MS` defaults to 6000 and the equivocation checks are flaky below about
+10 seconds — measured, not guessed: 6 consecutive passes at 8000 and a single
+failure at the same setting. Use `RUN_MS=12000` when the result has to mean
+something.
+
 Four replicas over real WebSockets, each executing `torihiki.state/apply-block`
 on the blocks inga commits, then asked whether they hold the same exchange.
 Run before the extraction (from engi) and after (from inga); both pass:
