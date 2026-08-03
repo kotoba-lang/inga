@@ -3,14 +3,15 @@
 
   ## What changes, and what deliberately does not
 
-  `engi.stake` already implements permissionless admission by external
+  `inga.stake` (which arrived here from engi in the same extraction) already
+  implements permissionless admission by external
   collateral, stake-weighted quorum, equivocation-only slashing, and a
   role-tagged single bond market (`:ordering` for block-consensus voting,
   `:recompute` for proof-of-compute sampling). None of that economics is
   reimplemented here, and this namespace must not grow a second copy of it —
   superproject ADR-2608031200 named that failure mode the same week.
 
-  The one thing `engi.stake` cannot do by itself is the thing F3 is about:
+  The one thing `inga.stake` cannot do by itself is the thing F3 is about:
   **it is HANDED the bond map from outside.** `{witness-did -> {:amount
   :roles}}` arrives already assembled, so who is a witness is decided
   somewhere the consensus does not order. Two replicas reading the escrow at
@@ -32,14 +33,15 @@
   role set on the existing market — a role added to one rulebook, not a
   second economy.
 
-  What this does NOT do: replace external collateral. `engi.stake`'s reason
+  What this does NOT do: replace external collateral. `inga.stake`'s reason
   for bonding USDC rather than EN holds unchanged (EN nets to zero across all
   agents, so bonding it disincentivises nothing), and ADR-2608038000 F3 says
   so explicitly. And `:storage` power here is credited by attested retrieval
   sampling — the shape `:recompute` already uses — **not** by PoRep/PoSt.
   This library does not implement a storage proof and no deployment using it
   may claim Filecoin-equivalent storage guarantees."
-  (:require [clojure.set :as set]))
+  (:require [clojure.set :as set]
+            [inga.stake :as stake]))
 
 (def roles
   "Closed on purpose. An unknown role that silently counts toward nothing is
@@ -124,18 +126,29 @@
       :else (update table :bonds dissoc witness))))
 
 (defmethod apply-event :slash
-  [table {:keys [witness amount] :as e}]
+  [table {:keys [witness terms] :as e}]
   (if-not (get-in table [:bonds witness])
     (throw (ex-info "inga.power: :slash for a witness with no bond"
                     {:type :inga.power/invalid-event :event e}))
-    ;; The EVIDENCE is checked before an event gets here — `engi.stake`
-    ;; already owns equivocation detection and its verification, and
-    ;; duplicating that check would be two implementations of one safety
-    ;; rule. What this owns is that the consequence lands at a decided point
-    ;; in the sequence, so every replica's table changes at the same height.
-    (-> table
-        (update-in [:bonds witness :amount] #(max 0 (- % amount)))
-        (assoc-in [:bonds witness :roles] #{}))))
+    ;; The economics are `inga.stake/slash`'s (burn fraction, whistleblower
+    ;; share, where the remainder is credited). The EVIDENCE is checked before
+    ;; an event gets here — `inga.stake` owns equivocation detection and its
+    ;; verification too. What this owns is that the consequence lands at a
+    ;; DECIDED POINT in the sequence, so every replica's table changes at the
+    ;; same height rather than whenever each one noticed.
+    ;; `stake/slash` returns `{:bonds :burned :rewarded}` and removes the
+    ;; offender's ENTIRE record. Writing the roles back afterwards -- which the
+    ;; first version of this did -- resurrects a ghost `{:roles #{}}` entry
+    ;; that `bonds` then hands to stake as a zero-stake witness. The test that
+    ;; caught it is `slashing-lands-at-a-decided-height`.
+    (let [{:keys [bonds burned rewarded]} (stake/slash (:bonds table) witness
+                                                       (or terms {}))]
+      (-> table
+          (assoc :bonds bonds)
+          ;; The numbers go into the table too: a slash whose consequence is
+          ;; ordered but whose magnitude is not is only half committed.
+          (update :slashes (fnil conj [])
+                  {:witness witness :burned burned :rewarded rewarded})))))
 
 (defn apply-events
   "Fold a block's power events at `height`. `:height` is recorded so a reader
@@ -144,38 +157,22 @@
   [table height events]
   (assoc (reduce apply-event table events) :height height))
 
-;; ── reading the table ───────────────────────────────────────────────────────
+;; ── reading the table: DELEGATED ────────────────────────────────────────────
+;;
+;; `eligible` / `stake-for` / `quorum-met?` used to live here as simplified
+;; reimplementations, written before `inga.stake` was in this repo. They are
+;; gone. `inga.stake` already owns admission, stake weighting and the quorum
+;; rule, and two implementations of a quorum rule is not a redundancy — it is
+;; two answers to "did this block commit". ADR-2608031200 named this failure
+;; mode the same week.
+;;
+;; What is left here is the part `inga.stake` genuinely cannot do: it is HANDED
+;; a bonds map, so `bonds` below is the seam that makes that map a function of
+;; the committed prefix instead of of whenever someone read the escrow.
 
-(defn eligible
-  "Witnesses bonded at or above `floor` for `role`. The floor is a parameter
-  because it is role-asymmetric policy that lives with the economics
-  (`engi.stake/required-bond`), not here."
-  [table role floor]
-  (when-not (roles role)
-    (throw (ex-info "inga.power: unknown role" {:type :inga.power/unknown-role :role role})))
-  (into #{}
-        (keep (fn [[witness {:keys [amount roles unbonding-at]}]]
-                (when (and (nil? unbonding-at) (contains? roles role) (>= amount floor))
-                  witness)))
-        (:bonds table)))
-
-(defn stake-for
-  "Total stake eligible for `role`. Stake-weighted rather than
-  witness-counted, which is what actually resists Sybil once anyone can mint
-  identities by splitting collateral: splitting a fixed amount across more
-  identities does not change the sum those identities can vote with."
-  [table role floor]
-  (transduce (map #(get-in table [:bonds % :amount] 0)) + 0 (eligible table role floor)))
-
-(defn quorum-met?
-  "Strictly more than two thirds of the eligible stake for `role`.
-
-  `>` and not `>=`: at exactly two thirds two disjoint quorums can both form,
-  and two quorums that do not intersect is precisely the condition every
-  safety argument in this family rules out."
-  [table role floor voters]
-  (let [eligible-set (eligible table role floor)
-        total (stake-for table role floor)
-        voted (transduce (map #(get-in table [:bonds % :amount] 0)) + 0
-                         (set/intersection (set voters) eligible-set))]
-    (and (pos? total) (> (* 3 voted) (* 2 total)))))
+(defn bonds
+  "The `{witness -> {:amount :roles}}` map `inga.stake` consumes, as of this
+  table's height. Witnesses in their unbonding notice period are excluded:
+  their collateral is still at risk but their vote is not counted."
+  [table]
+  (into {} (remove (comp :unbonding-at val)) (:bonds table)))

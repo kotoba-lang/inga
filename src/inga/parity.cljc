@@ -23,17 +23,53 @@
   `inga.ref`'s CAS decision over an in-memory head store. All pure, all
   synchronous on both runtimes.
 
+  Also covered, lifted verbatim from `engi.parity` when those namespaces moved
+  here: `inga.consensus`, `inga.pacemaker`, `inga.quorum`, `inga.sync` and a
+  real `inga.wire` encode/decode round trip. Merged into ONE digest rather than
+  kept as a second entry point — two parity commands is one command someone
+  forgets.
+
   NOT covered: `inga.state`. `arrangement/commit!` returns a CID on the JVM
   and a `js/Promise` on cljs, so there is no single synchronous digest to
   compare — the platform split is real and is documented in
   `inga.state`'s docstring rather than papered over here. Verifying the cljs
   path of `inga.state` needs arrangement's own cljs deps and is a separate
   piece of work, named in the README as open."
-  (:require [inga.fuel :as fuel]
+  (:require [inga.consensus :as c]
+            [inga.fuel :as fuel]
             [inga.head :as head]
+            [inga.pacemaker :as pm]
             [inga.power :as power]
+            [inga.quorum :as q]
             [inga.ref :as iref]
+            [inga.stake :as stake]
+            [inga.sync :as sync]
+            [inga.wire :as w]
             [kotobase.storage.core :as storage]))
+
+;; ── the consensus scenario, lifted verbatim from engi.parity ─────────────────
+;;
+;; engi wrote this first and for the same reason; it moved here with the
+;; namespaces it exercises. Merged into one digest rather than kept as a second
+;; entry point, because two parity commands is one command someone forgets.
+
+(defn- h [b] (str "H" (:inga.block/height b) "/" (:inga.block/proposer b)))
+
+(defn- blk [height parent proposer justify]
+  {:inga.block/height height :inga.block/parent-hash parent
+   :inga.block/proposals [] :inga.block/proposer proposer
+   :inga.block/ts (* height 10) :inga.block/justify justify})
+
+(defn- chain-of [n]
+  (loop [i 1 prev (blk 0 "genesis" :w1 nil) acc [(blk 0 "genesis" :w1 nil)]]
+    (if (> i n)
+      acc
+      (let [votes (mapv #(c/make-vote % (h prev) (:inga.block/height prev))
+                        [:w1 :w2 :w3])
+            b (blk i (h prev) :w1 (c/qc votes 4 (:inga.block/height prev)))]
+        (recur (inc i) b (conj acc b))))))
+
+
 
 (defn- sig-for [w r] (str w "|" (head/canonical-bytes r)))
 (defn- verify-fn [bytes sig w] (= sig (str w "|" bytes)))
@@ -69,11 +105,10 @@
            [{:event :bond :witness "w1" :amount 200 :roles [:ordering]}
             {:event :bond :witness "w2" :amount 100 :roles [:ordering :storage]}
             {:event :bond :witness "w3" :amount 100 :roles [:recompute]}
-            {:event :slash :witness "w1" :amount 50}])]
-    (str "power:" (power/stake-for t :ordering 1)
-         "/" (count (power/eligible t :ordering 1))
-         "/" (count (power/eligible t :storage 1))
-         "/" (power/quorum-met? t :ordering 1 ["w2"])
+            {:event :slash :witness "w1" :terms {}}])]
+    (str "power:" (count (power/bonds t))
+         "/" (count (stake/eligible-witnesses (power/bonds t) 1 :ordering))
+         "/" (count (stake/eligible-witnesses (power/bonds t) 1 :storage))
          "/" (:height t))))
 
 (defn- ref-digest []
@@ -96,8 +131,49 @@
          "/" (:published? c) "," (:version c)
          "/" (:cid (storage/-read-ref refs "main")))))
 
+(defn- consensus-digest []
+(let [chain (chain-of 6)
+        commits (c/three-chain-commits h chain)
+        votes (mapv #(c/make-vote % "tip" 6) [:w1 :w2 :w3])
+        real-qc (c/qc votes 4 6)
+        st (pm/on-qc (pm/initial :w1) real-qc)
+        nv (fn [w q] {:inga.nv/witness w :inga.nv/view 9 :inga.nv/high-qc q})
+        tc (pm/timeout-certificate [(nv :w1 real-qc) (nv :w2 nil) (nv :w3 nil)] 3)
+        entered (pm/on-timeout-certificate st tc 0 pm/default-params)
+        seg-ok (sync/validate-segment h 3 (nth chain 3) (subvec chain 4)
+                                      sync/default-params)
+        ;; the wire, through an actual encode/decode, so parity covers it too
+        wire-msg {:type :new-view :witness :w1 :view 9 :high-qc real-qc}
+        [back _] (w/decode (w/encode wire-msg))
+        ;; The quorum rule itself, because it is the part where a runtime
+        ;; difference is a security difference rather than a wrong number:
+        ;; integer division and `count` over a set are exactly the places JVM
+        ;; and JS have disagreed before.
+        holders (into {} (map (fn [i] [(str "holder-" i) {:amount 4000}]))
+                      (range 4))
+        sybil (into {} (map (fn [i] [(str "dust-" i) {:amount 1}])) (range 40))
+        bonds (merge holders sybil)
+        wset (set (keys bonds))
+        stake-q (q/stake-weighted bonds wset)
+        sybil-set (set (keys sybil))
+        digest (str "commits=" (count commits)
+                    ";qsizes=" (mapv c/quorum-size (range 1 13))
+                    ";sybil-heads=" (q/met? (q/for-set-size (count wset)) sybil-set)
+                    ";sybil-stake=" (q/met? stake-q sybil-set)
+                    ";honest-stake=" (q/met? stake-q (set (keys holders)))
+                    ";locked=" (pm/qc-view (:locked-qc st))
+                    ";tcview=" (:inga.tc/view tc)
+                    ";entered=" (:view entered)
+                    ";timeouts=" (mapv #(pm/timeout-for % pm/default-params) (range 4))
+                    ";seg=" (pr-str seg-ok)
+                    ";req=" (pr-str (sync/request 0 999999 sync/default-params))
+                    ";wire=" (pr-str (sort (:inga.qc/witnesses (:high-qc back))))
+                    ";jsonsafe=" (w/json-safe? (w/encode wire-msg)))]
+    digest))
+
 (defn digest []
-  (str (head-digest) " " (fuel-digest) " " (power-digest) " " (ref-digest)))
+  (str (head-digest) " " (fuel-digest) " " (power-digest) " " (ref-digest)
+       "\n" (consensus-digest)))
 
 (defn report []
   (println (digest))

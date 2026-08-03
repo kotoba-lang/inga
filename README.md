@@ -238,17 +238,68 @@ nothing), and `:storage` power is credited by attested retrieval sampling —
 the shape `:recompute` already uses — **not** PoRep/PoSt. No deployment using
 this may claim Filecoin-equivalent storage guarantees.
 
+## The consensus — extracted from engi 2026-08-03
+
+`inga.{consensus,quorum,pacemaker,replica,sync,wire,net,attest,stake}` came
+from `kotoba-lang/engi`, where chained HotStuff had grown up inside a currency
+repo. The reason to move it is in engi's own `consensus.cljc` docstring:
+
+> engi does not know what a transaction is, and must not — a consensus layer
+> that imports either application becomes "a consensus layer for exactly one
+> application".
+
+| ns | what it owns |
+|---|---|
+| `inga.consensus` | block / QC shape, `n=3f+1` and `quorum=2f+1`, the chained 3-chain commit rule, round-robin leader rotation |
+| `inga.quorum` | quorum as one predicate, count-based and stake-weighted |
+| `inga.pacemaker` | views, timeouts, timeout certificates, view change |
+| `inga.replica` | the replica itself — adopt, commit, the machine seam, equivocation recording |
+| `inga.sync` | catch-up over segments a stranger hands you |
+| `inga.wire` | total decode; JSON has no keywords, so `:inga.block/height` travels as `"height"` |
+| `inga.net` (+ `net/server`, `net/ws`) | the WebSocket transport, both halves |
+| `inga.attest` (+ `attest/ed25519`) | signatures on certificates — what makes a quorum a quorum rather than a list of names |
+| `inga.stake` | permissionless admission by external collateral, stake-weighted quorum, equivocation-only slashing |
+
+**Because the namespaces moved, `:engi.block/*` keywords became
+`:inga.block/*`. That is not a wire change** — `inga.wire`'s own docstring
+notes JSON has no keywords, so only the local name changed.
+
+`inga.power` (F3) was written before `inga.stake` arrived and had simplified
+copies of `eligible` / `stake-for` / `quorum-met?`. They are gone: `inga.stake`
+owns those, and two implementations of a quorum rule is not redundancy, it is
+two answers to "did this block commit". What `power` keeps is the part `stake`
+genuinely cannot do — making the bonds map a function of the committed prefix.
+
+### Acceptance
+
+```bash
+nbb --classpath "src:<torihiki>/src:<bytes>/src" script/torihiki-on-inga.cljs
+```
+
+Four replicas over real WebSockets, each executing `torihiki.state/apply-block`
+on the blocks inga commits, then asked whether they hold the same exchange.
+Run before the extraction (from engi) and after (from inga); both pass:
+
+```
+  common committed blocks: 43
+  every replica the same : true
+  the thief's order      : refused {:not-your-account 2, :wrong-key 23}
+
+TORIHIKI-ON-INGA: pass — four replicas, one exchange
+```
+
 ## Not here yet
 
-**Extraction** — `engi.{consensus,quorum,pacemaker,replica,sync,wire,net,attest,stake,parity}`
-(3,166 lines of chained HotStuff, already running: 4 replicas, real WebSockets,
-real keys, agreeing on a live exchange's state) move here. `engi` is under
-active daily development and the extraction has to land `engi` and `torihiki`
-together, so it waits for that repo to quiesce.
+**engi does not depend on inga.** Its remaining namespaces required nothing
+from the consensus set, which is why the cut was clean — but it also means
+inga's consumer today is the torihiki harness, not the ENGI ledger. Running
+ENGI/EN *on* inga is future work.
 
-Until then **inga contains no consensus** — F1/F2/F3 are the state, execution
-and membership planes a consensus drives, and the reference quorum in the
-tests is a cooperative oracle, not agreement.
+Still open, from the same ADR: `inga.state`'s cljs path is unverified;
+`:storage` power has no retrieval-sampling implementation; the `.kotoba`
+machine body is blocked on the compiler; bond collateral is not deployed, so
+**slashing is implemented and does not fire**; equivocation evidence is
+recorded and does not propagate.
 
 ## License
 
