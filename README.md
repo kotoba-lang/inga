@@ -35,6 +35,7 @@ followed from that cause.
 | `inga.state` | **F1** — the committed state root as a real CID, over `arrangement`'s 4 content-addressed indices; plus the `:cid` / `:opaque` distinction that gates what may back a kotobase ref |
 | `inga.fuel` | **F2** — metered execution where running out is a *state transition*, never an exception |
 | `inga.power` | **F3** — the power table as committed state, and a `:storage` role on the existing bond market |
+| `inga.retrieval` | **F3** — crediting that `:storage` role by asking a witness to produce blocks it claims to hold |
 | `inga.parity` | one scenario over the pure namespaces, run on JVM **and** nbb, printing one digest |
 
 Pure `.cljc`. No I/O, no crypto, no wall-clock — signature verification and
@@ -316,9 +317,35 @@ network does, which here is retaining and serving datom blocks.
 
 It does **not** replace external collateral (engi's reason for bonding USDC
 rather than EN is unchanged: EN nets to zero, so bonding it disincentivises
-nothing), and `:storage` power is credited by attested retrieval sampling —
-the shape `:recompute` already uses — **not** PoRep/PoSt. No deployment using
-this may claim Filecoin-equivalent storage guarantees.
+nothing).
+
+`inga.retrieval` credits the role. Filecoin needs PoRep and PoSt because a
+storage proof there must survive an adversary who can fetch the data from
+anywhere and is paid to look like a storer. A datom plane needs far less for a
+much weaker claim, because **the data is content-addressed**: "return the
+bytes for this CID" verifies itself — hash what came back and compare. No
+setup, no sector, no proving time; the whole verifier is one hash and one
+comparison.
+
+A passing sample proves **at sample time, this witness could produce these
+bytes** — and three things it does not:
+
+1. **durable storage.** A witness that fetched the block from a peer the
+   moment it was asked passes. Nothing distinguishes holding from fetching.
+2. **unique storage.** Ten witnesses can pass on one physical copy.
+3. **future availability.** The sample is about the instant it ran.
+
+The economic argument against (1) is that fetching on demand costs more than
+storing when samples are frequent and unpredictable enough — an *argument*,
+not a measurement. **No deployment using this may claim Filecoin-equivalent
+storage guarantees.**
+
+The challenge is derived from a value fixed *after* the storage claim and by
+nobody in particular (a committed block hash), because a witness that can
+predict its challenge stores only what will be asked for. Deriving it from the
+clock or from a caller's choice would be the same hole from the other side.
+A witness claiming nothing is `:unproven`, not `:pass` — otherwise the
+cheapest way to look like a storage provider is to claim to store nothing.
 
 ## The consensus — extracted from engi 2026-08-03
 
