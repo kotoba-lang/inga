@@ -368,6 +368,42 @@ travel. Measured over real sockets:
 Without it, an equivocator that routes its two votes to different peers escapes
 entirely.
 
+### What a quorum resists is declared, not inferred
+
+`replica` used to take `:quorum` and, when omitted, silently fall back to
+counting its own witness list. Head-counting is correct for a **managed** set
+and is exactly what a Sybil defeats under permissionless admission — and
+nothing in the built state said which one you had.
+
+`inga.quorum/profiles` is now a closed set, modelled on
+`kotobase.storage.core/ref-profiles` and for the reason that namespace gives:
+*the failure mode of guessing is silent.*
+
+| profile | what it resists |
+|---|---|
+| `:head-count` | nothing, against an adversary who can register witnesses. Correct when who may hold a key is decided outside the protocol. |
+| `:stake-weighted` | Sybil identities: splitting a bond across more of them changes the head count and not the stake. Requires a bond source. |
+
+The convenient default is unchanged — every managed deployment wants it — but
+a replica now carries `:quorum-profile`, so what a deployment actually resists
+is a value you can ask it for. An unlabelled predicate reports `:head-count`
+rather than being upgraded on the caller's behalf.
+
+### Slashing still does not fire, and that is a decision, not a bug
+
+`inga.stake` implements bonding, stake-weighted quorum and equivocation-only
+slashing; `inga.power` makes the bond table a function of the committed
+prefix; `inga.quorum/stake-weighted` plugs into `replica`. The seam is
+complete and unused, because there is no bond source.
+
+[`kotoba-lang/engi-witness-escrow`](https://github.com/kotoba-lang/engi-witness-escrow)
+is the on-chain custody half — reviewed, tested, and **deliberately not
+deployed**. Its own README says why: *deploying a contract that custodies real
+third-party money is a separate, higher-stakes decision requiring its own
+explicit review.* That decision is the blocker, and it is not an engineering
+one. Until it is made, deployments run `:head-count` and have no economic
+security — which is now something the state says out loud.
+
 Still open, from the same ADR: `:storage` power has no retrieval-sampling implementation; the `.kotoba`
 machine body is blocked on the compiler; bond collateral is not deployed, so
 **slashing is implemented and does not fire**; equivocation evidence is

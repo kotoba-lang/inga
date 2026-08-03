@@ -116,3 +116,25 @@
                                   :high-qc qc}))]
     (is (= (:inga.qc/stake qc) (:inga.qc/stake (:high-qc m)))
         "a stake certificate arriving without its stake must be re-derived or refused")))
+
+;; ── what a quorum resists, declared rather than inferred ─────────────────────
+
+(deftest a-quorum-declares-what-it-resists
+  (testing "modelled on kotobase.storage.core/ref-profiles, for the reason that
+            namespace gives: the failure mode of guessing is silent"
+    (is (= :head-count (q/profile 3)))
+    (is (= :stake-weighted (q/profile (q/stake-weighted {"a" {:amount 1}} #{"a"}))))
+    (is (nil? (q/profile "not a quorum")))))
+
+(deftest a-bare-function-is-head-count-not-unknown
+  (testing "an unlabelled predicate could be anything, and calling that
+            :stake-weighted on the caller's behalf is exactly the silent
+            upgrade this is meant to prevent"
+    (is (= :head-count (q/profile (fn [_] true))))))
+
+(deftest the-profile-survives-being-used
+  (let [sw (q/stake-weighted {"a" {:amount 3} "b" {:amount 1}} #{"a" "b"})]
+    (is (true? (boolean (sw #{"a"}))) "3 of 4 is more than two thirds")
+    (is (false? (boolean (sw #{"b"}))))
+    (is (= :stake-weighted (q/profile sw))
+        "and coercing/calling it does not strip the declaration")))

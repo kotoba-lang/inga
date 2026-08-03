@@ -60,13 +60,44 @@
   [n]
   (at-least (c/quorum-size n)))
 
+(def profiles
+  "What a quorum rule actually resists, declared rather than inferred.
+
+  Modelled on `kotobase.storage.core/ref-profiles`, and for the same reason
+  it gives: the failure mode of guessing is SILENT. A head count and a
+  stake-weighted rule are both \"a quorum\", they are both correct code, and
+  the difference between them is whether an adversary who can mint identities
+  gets a free supermajority.
+
+  - `:head-count` — n-of-m by identity. Correct for a MANAGED set, where who
+    may hold a key is decided outside the protocol. **No Sybil resistance**:
+    an adversary who can register witnesses can register a quorum.
+  - `:stake-weighted` — more than 2/3 of bonded stake. Splitting a bond
+    across identities changes the head count and not the stake, so it buys
+    nothing. Requires a bond source."
+  #{:head-count :stake-weighted})
+
 (defn stake-weighted
   "Quorum by bonded stake: more than 2/3 of the epoch's total bond.
 
   The rule ADR-2607994000 decided on. Splitting a bond across identities
   changes the head count and not the stake, so it buys nothing."
   [bonds witness-set]
-  (fn [witnesses] (stake/stake-quorum-met? witnesses bonds witness-set)))
+  (with-meta
+    (fn [witnesses] (stake/stake-quorum-met? witnesses bonds witness-set))
+    {::profile :stake-weighted}))
+
+(defn profile
+  "Which of `profiles` `q` is.
+
+  A bare integer is `:head-count` — not because that is a lesser choice, but
+  because it is a choice, and a deployment that believes it has Sybil
+  resistance while counting heads has the belief and not the property."
+  [q]
+  (cond
+    (integer? q) :head-count
+    (fn? q) (or (::profile (meta q)) :head-count)
+    :else nil))
 
 (defn ->predicate
   "Coerce `q` to a quorum predicate. An integer means head count; a function

@@ -10,6 +10,7 @@
             [inga.attest :as att]
             [inga.consensus :as c]
             [inga.pacemaker :as pm]
+            [inga.quorum :as q]
             [clojure.string]
             [inga.stake :as stake]
             [inga.sync :as sync]))
@@ -997,3 +998,17 @@
       (is (= 1 (count (:equivocations s2))))
       (is (some #(= :evidence (:type (:msg %))) out2)
           "and the proof leaves this replica"))))
+
+(deftest a-replica-records-what-its-quorum-resists
+  (testing "a deployment that believes it has Sybil resistance while counting
+            heads has the belief and not the property"
+    (is (= :head-count (:quorum-profile (receiver)))
+        "the convenient default is a choice, and it is written down")
+    (is (= :head-count
+           (:quorum-profile (r/replica {:witness :w1 :witnesses [:w1 :w2 :w3 :w4]
+                                        :quorum 3 :hash-fn hash-fn}))))
+    (is (= :stake-weighted
+           (:quorum-profile
+            (r/replica {:witness :w1 :witnesses [:w1 :w2 :w3 :w4]
+                        :quorum (q/stake-weighted {"w1" {:amount 1}} #{"w1"})
+                        :hash-fn hash-fn}))))))

@@ -219,7 +219,15 @@
   `quorum` is anything `inga.quorum/->predicate` accepts. An integer means a
   head count and is right for a managed set; under permissionless admission
   pass `inga.quorum/stake-weighted`, because head-counting is what a Sybil
-  defeats."
+  defeats.
+
+  The resulting state carries `:quorum-profile` (`inga.quorum/profiles`), so
+  what a deployment actually resists is a value it can be asked for rather
+  than something inferred from how the argument was built. Omitting `quorum`
+  still defaults to counting this replica's own witness list — the default is
+  kept because every managed deployment wants it, and it is RECORDED as
+  `:head-count` because a deployment that believes it has Sybil resistance
+  while counting heads has the belief and not the property."
   [{:keys [witness witnesses quorum genesis hash-fn params
            chain-id sign-fn verify-fn machine]}]
   (let [params (merge default-params params)
@@ -231,6 +239,7 @@
     {:witness witness
      :witnesses (vec witnesses)
      :quorum (or quorum (count witnesses))
+     :quorum-profile (q/profile (or quorum (count witnesses)))
      :hash-fn hash-fn
      :params params
      ;; The signing seam. `chain-id` is domain separation: a vote signed on a
