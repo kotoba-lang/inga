@@ -1,0 +1,85 @@
+(ns inga.head-test
+  "What a certificate has to prove. Every test here is a way a head could be
+  accepted that must not be — the failure mode of a ref plane is silent
+  acceptance, not a thrown exception."
+  (:require [clojure.test :refer [deftest is testing]]
+            [inga.head :as head]))
+
+(def quorum 3)
+
+(defn- sig-for [witness record] (str witness "|" (head/canonical-bytes record)))
+(defn- verify-fn [bytes sig witness] (= sig (str witness "|" bytes)))
+
+(defn- record [& {:keys [seq cid prev ref] :or {seq 0 cid "cid-1" prev nil ref "main"}}]
+  (head/head-record {:ref-name ref :seq seq :cid cid :prev prev :height nil}))
+
+(defn- cert-over [rec ws]
+  {:sigs (mapv (fn [w] {:witness w :sig (sig-for w rec)}) ws)})
+
+(defn- head-of [rec cert] (assoc rec "cert" cert))
+
+(deftest a-quorum-of-real-signatures-verifies
+  (let [r (record)]
+    (is (some? (head/verify-cert r (cert-over r ["w1" "w2" "w3"]) quorum verify-fn)))
+    (is (= #{"w1" "w2" "w3"}
+           (:verified-signers (head/verify-cert r (cert-over r ["w1" "w2" "w3"]) quorum verify-fn))))))
+
+(deftest below-threshold-is-rejected
+  (let [r (record)]
+    (is (nil? (head/verify-cert r (cert-over r ["w1" "w2"]) quorum verify-fn)))))
+
+(deftest one-witness-cannot-reach-quorum-by-repeating-itself
+  (testing "distinct-by-witness, the same rule engi.consensus/qc applies to votes"
+    (let [r (record)
+          repeated {:sigs (repeat 5 {:witness "w1" :sig (sig-for "w1" r)})}]
+      (is (nil? (head/verify-cert r repeated quorum verify-fn))
+          "five copies of one signature is one signer"))))
+
+(deftest signatures-must-cover-THIS-record
+  (testing "a certificate lifted from another sequence does not verify here"
+    (let [mine (record :seq 4 :cid "cid-mine")
+          theirs (record :seq 4 :cid "cid-theirs")]
+      (is (nil? (head/verify-cert mine (cert-over theirs ["w1" "w2" "w3"]) quorum verify-fn))))))
+
+(deftest a-certificate-for-another-ref-does-not-verify
+  (testing "the failure ADR-2607299900 found in the signed-head plane: a record
+            signed for a different graph was completely valid, and would be
+            accepted as this graph's head if placed under the wrong key"
+    (let [mine (record :ref "main")
+          theirs (record :ref "other")]
+      (is (nil? (head/verify-cert mine (cert-over theirs ["w1" "w2" "w3"]) quorum verify-fn))
+          "ref is inside the signed bytes, so a cross-ref cert cannot be reused"))))
+
+(deftest forged-signatures-are-counted-out-not-in
+  (let [r (record)
+        mixed {:sigs [{:witness "w1" :sig (sig-for "w1" r)}
+                      {:witness "w2" :sig (sig-for "w2" r)}
+                      {:witness "w3" :sig "forged"}]}]
+    (is (nil? (head/verify-cert r mixed quorum verify-fn))
+        "three named signers, two real ones -- that is two")))
+
+(deftest an-unverifiable-head-reads-as-absent
+  (testing "an untrusted host is expected to be able to serve rubbish"
+    (let [r (record)]
+      (is (nil? (head/verify-head (head-of r (cert-over r ["w1"])) quorum verify-fn)))
+      (is (nil? (head/verify-head {"v" "wrong/version"} quorum verify-fn)))
+      (is (nil? (head/verify-head {} quorum verify-fn)))
+      (is (nil? (head/verify-head nil quorum verify-fn)))
+      (is (some? (head/verify-head (head-of r (cert-over r ["w1" "w2" "w3"])) quorum verify-fn))))))
+
+(deftest genesis-and-empty-prev-are-not-confusable
+  (testing "canonical bytes render nil prev as empty, which is unambiguous
+            because a CID is never empty"
+    (is (not= (head/canonical-bytes (record :prev nil))
+              (head/canonical-bytes (record :prev "cid-0"))))
+    (is (= (head/canonical-bytes (record :prev nil))
+           (head/canonical-bytes (record :prev nil)))
+        "and it is deterministic")))
+
+(deftest next-head-derives-the-sequence
+  (let [genesis (head/next-head "main" nil "cid-1" nil)]
+    (is (= 0 (get genesis "seq")))
+    (is (nil? (get genesis "prev")))
+    (let [second' (head/next-head "main" genesis "cid-2" nil)]
+      (is (= 1 (get second' "seq")))
+      (is (= "cid-1" (get second' "prev"))))))
