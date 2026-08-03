@@ -25,6 +25,10 @@
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :main-opts ["-m" "cognitect.test-runner"]}
+  ;; One scenario, both runtimes, one digest. See inga.parity's docstring:
+  ;; a JVM suite is not evidence about ClojureScript, and ClojureScript is
+  ;; the runtime kotobase actually deploys on.
+  :parity {:main-opts ["-m" "inga.parity"]}
   :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
                      "--fail-level" "error"]}}}

@@ -40,13 +40,61 @@
   wiring an `:opaque` machine to kotobase's ref plane, because a kotobase
   ref must point at something hydratable. `assert-hydratable!` is that gate,
   and it exists so the ordering constraint in D6 is enforced by code instead
-  of remembered by a reader."
+  of remembered by a reader.
+
+  ## Platform split — `root-fn` and `hydrate-fn` are async on ClojureScript
+
+  `arrangement/commit!` returns the commit CID DIRECTLY on the JVM and a
+  `js/Promise` of it on ClojureScript, and `restore` likewise. That split is
+  arrangement's, not something introduced here, and it is not hidden: the
+  runtime kotobase actually deploys on is a Cloudflare Worker, so the
+  Promise path is the important one and a caller that treats the return as a
+  string will get `#object[Promise]` in its state root and agree with nobody.
+
+  `inga.head`, `inga.ref`, `inga.fuel` and `inga.power` are pure and
+  synchronous on both runtimes — `inga.parity` runs them on JVM and nbb and
+  checks one digest. `inga.state` is the namespace where the split lives.
+
+  ## Fuel
+
+  When `:fuel` is supplied, ops are metered by `inga.fuel` and the outcome is
+  written into the db AS DATOMS, not hung off the state map. This is not a
+  stylistic choice: `root-fn` commits `(:db state)`, so a fuel ledger kept
+  anywhere else would not be covered by the root, and two replicas that
+  stopped at different ops could still produce identical CIDs. Recording it
+  as datoms makes exhaustion change the root, which is the only version of
+  this that a peer can check."
   (:require [arrangement.core :as arr]
-            [arrangement.datalog :as adl]))
+            [arrangement.datalog :as adl]
+            [inga.fuel :as fuel]))
 
 (def root-kinds #{:cid :opaque})
 
 (def schema-version arr/current-schema-version)
+
+(defn- apply-op [db {:keys [op s p o]}]
+  (case op
+    :assert (arr/assert-quad db {:s s :p p :o o})
+    :retract (arr/retract-quad db {:s s :p p :o o})
+    (throw (ex-info "inga.state: unknown op"
+                    {:type :inga.state/unknown-op :op op}))))
+
+(defn- fuel-datoms
+  "Write one block's fuel outcome into the db.
+
+  Only `spent`/`applied` for a block that finished, plus `exhausted-at` and
+  `dropped` when it did not. Writing an explicit `exhausted-at = -1` for the
+  normal case was tempting and wrong: it puts a datom per block into a
+  content-addressed index forever to record that nothing happened."
+  [db height {:keys [spent applied exhausted-at dropped]}]
+  (let [s (str "inga.fuel/block/" height)
+        base [{:op :assert :s s :p "inga.fuel/spent" :o spent}
+              {:op :assert :s s :p "inga.fuel/applied" :o applied}]]
+    (reduce apply-op db
+            (cond-> base
+              exhausted-at
+              (conj {:op :assert :s s :p "inga.fuel/exhausted-at" :o exhausted-at}
+                    {:op :assert :s s :p "inga.fuel/dropped" :o dropped})))))
 
 (defn machine
   "A consensus machine whose root is a real CID.
@@ -62,14 +110,28 @@
   precisely so nobody gets an unblinded index by forgetting an argument, and
   passed straight through here.
 
+  `:fuel` is optional `{:budget-fn (fn [block] -> int) :cost-fn (fn [op] -> int)
+  :height-fn (fn [block] -> int)}`. Seams are checked with `ifn?` rather than
+  `fn?` throughout: a keyword is a perfectly good accessor (`:height-fn
+  :height`) and rejecting one would be a restriction with no safety behind it
+  — what the check is for is catching a seam that was forgotten, and `nil` is
+  not `ifn?` either way. `:height-fn` is required alongside the
+  others because a fuel record without the height it happened at is a fact
+  nobody can locate in the chain.
+
   Returns `{:init-fn :apply-fn :root-fn :root-kind :hydrate-fn}`. The first
   three are the shape the replica already takes."
-  [{:keys [decode-block put! get-fn blind-fn encrypt-fn]}]
+  [{:keys [decode-block put! get-fn blind-fn encrypt-fn fuel]}]
   (doseq [[k v] {:decode-block decode-block :put! put! :get-fn get-fn
                  :blind-fn blind-fn :encrypt-fn encrypt-fn}]
-    (when-not (fn? v)
-      (throw (ex-info "inga.state/machine: missing or non-function seam"
+    (when-not (ifn? v)
+      (throw (ex-info "inga.state/machine: missing or non-callable seam"
                       {:type :inga.state/invalid-seam :seam k}))))
+  (when fuel
+    (doseq [k [:budget-fn :cost-fn :height-fn]]
+      (when-not (ifn? (get fuel k))
+        (throw (ex-info "inga.state/machine: :fuel needs budget-fn, cost-fn and height-fn"
+                        {:type :inga.state/invalid-fuel :seam k})))))
   {:root-kind :cid
    ;; A THUNK, not a value. engi's own ADR-2608022600 found this the hard
    ;; way: a machine map holding a ready-made exchange handed every replica
@@ -79,16 +141,17 @@
    :init-fn (fn [] {:db (arr/empty-db) :prev nil})
    :apply-fn
    (fn [state block]
-     (update state :db
-             (fn [db]
-               (reduce (fn [d {:keys [op s p o]}]
-                         (case op
-                           :assert (arr/assert-quad d {:s s :p p :o o})
-                           :retract (arr/retract-quad d {:s s :p p :o o})
-                           (throw (ex-info "inga.state: unknown op"
-                                           {:type :inga.state/unknown-op :op op}))))
-                       db
-                       (decode-block block)))))
+     (let [ops (decode-block block)]
+       (if-not fuel
+         (update state :db #(reduce apply-op % ops))
+         (let [height ((:height-fn fuel) block)
+               r (fuel/apply-metered
+                  {:state state :ops ops
+                   :budget ((:budget-fn fuel) block)
+                   :cost-fn (:cost-fn fuel)
+                   :step (fn [s op] (update s :db apply-op op))})]
+           ;; Into the DB, so `root-fn` covers it. See the ns docstring.
+           (update (:state r) :db fuel-datoms height r)))))
    :root-fn
    (fn [state]
      ;; Content-addressed: the same db + prev + schema-version commits to the

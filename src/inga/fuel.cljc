@@ -77,8 +77,8 @@
   charge, then notice — lets one expensive op overrun by an unbounded amount,
   and 'unbounded' is not a quantity two replicas can agree on."
   [{:keys [state ops budget cost-fn step]}]
-  (when-not (and (nat-int? budget) (fn? cost-fn) (fn? step))
-    (throw (ex-info "inga.fuel/apply-metered: budget must be a non-negative int, cost-fn and step fns"
+  (when-not (and (nat-int? budget) (ifn? cost-fn) (ifn? step))
+    (throw (ex-info "inga.fuel/apply-metered: budget must be a non-negative int, cost-fn and step callable"
                     {:type :inga.fuel/invalid-args})))
   (loop [s state, remaining (seq ops), spent 0, applied 0, idx 0]
     (if-not remaining

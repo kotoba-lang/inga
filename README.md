@@ -35,6 +35,7 @@ followed from that cause.
 | `inga.state` | **F1** — the committed state root as a real CID, over `arrangement`'s 4 content-addressed indices; plus the `:cid` / `:opaque` distinction that gates what may back a kotobase ref |
 | `inga.fuel` | **F2** — metered execution where running out is a *state transition*, never an exception |
 | `inga.power` | **F3** — the power table as committed state, and a `:storage` role on the existing bond market |
+| `inga.parity` | one scenario over the pure namespaces, run on JVM **and** nbb, printing one digest |
 
 Pure `.cljc`. No I/O, no crypto, no wall-clock — signature verification and
 the quorum itself are injected, the same seam `kotobase.storage.signed-head`
@@ -89,8 +90,26 @@ This is what makes **ADR-2608039000** (`blockchain / 分散型経路に D1 を�
 ## Verification
 
 ```bash
-clojure -M:test    # 42 tests, 124 assertions
+clojure -M:test      # 47 tests, 131 assertions
+clojure -M:lint      # 0 errors, 0 warnings
+clojure -M:parity    # and the same on nbb -- both must print one line
+nbb --classpath "src:$(clojure -Spath | tr ':' '\n' | grep kotobase-storage)" \
+    -e "(require '[inga.parity :as p]) (p/report)"
 ```
+
+A JVM suite is not evidence about ClojureScript, and ClojureScript is the
+runtime kotobase deploys on. `inga.parity` runs `head` / `fuel` / `power` /
+`ref` on both and checks one digest:
+
+```
+head:70/3/false/false fuel:10,/3,3,6/0,0 power:100/1/1/true/4 ref:true/false,cid-1/true,1/cid-2
+```
+
+**`inga.state` is not covered by parity, and that is a real gap, not an
+omission.** `arrangement/commit!` returns a CID on the JVM and a `js/Promise`
+on cljs, so there is no single synchronous digest to compare. The split is
+documented in `inga.state`'s docstring rather than papered over; verifying its
+cljs path needs arrangement's own cljs deps and is open work.
 
 The acceptance test is **kotobase's own conformance suite**, not one written
 here:

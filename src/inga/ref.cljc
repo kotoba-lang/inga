@@ -118,8 +118,8 @@
   [{:keys [read-head! write-head! propose! verify-fn quorum height-fn]}]
   (doseq [[k v] {:read-head! read-head! :write-head! write-head!
                  :propose! propose! :verify-fn verify-fn}]
-    (when-not (fn? v)
-      (throw (ex-info "inga.ref: missing or non-function seam"
+    (when-not (ifn? v)
+      (throw (ex-info "inga.ref: missing or non-callable seam"
                       {:type :inga.ref/invalid-seam :seam k}))))
   (when-not (pos-int? quorum)
     (throw (ex-info "inga.ref: quorum must be a positive integer"

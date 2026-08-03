@@ -4,6 +4,7 @@
   Datalog. The second half is the whole point — same-digest was already
   achievable and was not enough."
   (:require [clojure.test :refer [deftest is testing]]
+            [inga.fuel :as fuel]
             [inga.state :as state]))
 
 ;; A shared content-addressed block store. Replicas write into the SAME store
@@ -108,3 +109,72 @@
     (let [m (machine-on (store))]
       (is (not (identical? ((:init-fn m)) ((:init-fn m))))
           "each replica gets its own initial state"))))
+
+;; ── F2 wired into F1: exhaustion must change the root ────────────────────────
+
+(defn- metered-machine [blocks budget]
+  (state/machine
+   {:decode-block :ops
+    :put! (fn [cid bytes] (swap! blocks assoc cid bytes))
+    :get-fn (fn [cid] (get @blocks cid))
+    :blind-fn pr-str
+    :encrypt-fn identity
+    :fuel {:budget-fn (constantly budget)
+           :cost-fn (fuel/fixed-cost 1)
+           :height-fn :height}}))
+
+(def big-block {:height 1 :ops ops-a})
+
+(deftest fuel-exhaustion-changes-the-root
+  (testing "the property the whole wiring exists for -- a fuel ledger kept
+            outside the db would leave two replicas that stopped at different
+            ops producing identical CIDs, which would look like agreement"
+    (let [blocks (store)
+          generous ((:root-fn (metered-machine blocks 100))
+                    ((:apply-fn (metered-machine blocks 100))
+                     ((:init-fn (metered-machine blocks 100))) big-block))
+          starved ((:root-fn (metered-machine blocks 1))
+                   ((:apply-fn (metered-machine blocks 1))
+                    ((:init-fn (metered-machine blocks 1))) big-block))]
+      (is (not= generous starved)
+          "a replica that ran out is visibly a different state, not a silent one"))))
+
+(deftest the-same-budget-still-agrees
+  (let [blocks (store)
+        run #(let [m (metered-machine blocks 2)]
+               ((:root-fn m) ((:apply-fn m) ((:init-fn m)) big-block)))]
+    (is (= 1 (count (set (repeatedly 4 run))))
+        "metering does not cost determinism")))
+
+(deftest the-fuel-record-is-queryable-from-the-cid
+  (let [blocks (store)
+        m (metered-machine blocks 2)
+        root ((:root-fn m) ((:apply-fn m) ((:init-fn m)) big-block))
+        restored ((:hydrate-fn m) root identity)]
+    (is (= #{[2]} (state/query restored
+                               {:find '[?i]
+                                :where '[["inga.fuel/block/1" "inga.fuel/exhausted-at" ?i]]}))
+        "a reader holding only the CID can see where this block ran out")
+    (is (= #{[1]} (state/query restored
+                               {:find '[?n]
+                                :where '[["inga.fuel/block/1" "inga.fuel/dropped" ?n]]})))))
+
+(deftest a-block-that-finished-writes-no-exhaustion-datom
+  (testing "an explicit exhausted-at = -1 per block would put a datom into a
+            content-addressed index forever to record that nothing happened"
+    (let [blocks (store)
+          m (metered-machine blocks 100)
+          root ((:root-fn m) ((:apply-fn m) ((:init-fn m)) big-block))
+          restored ((:hydrate-fn m) root identity)]
+      (is (= #{} (state/query restored
+                              {:find '[?i]
+                               :where '[["inga.fuel/block/1" "inga.fuel/exhausted-at" ?i]]})))
+      (is (= #{[3]} (state/query restored
+                                 {:find '[?n]
+                                  :where '[["inga.fuel/block/1" "inga.fuel/applied" ?n]]}))))))
+
+(deftest fuel-config-must-be-complete
+  (is (thrown? #?(:clj Exception :cljs js/Error)
+               (state/machine {:decode-block identity :put! (fn [_ _]) :get-fn identity
+                               :blind-fn pr-str :encrypt-fn identity
+                               :fuel {:budget-fn (constantly 1)}}))))
