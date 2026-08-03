@@ -1,0 +1,48 @@
+(ns inga.fuel)
+
+;; F2's arithmetic, in Kotoba.
+;;
+;; `inga.fuel/apply-metered` decides, per op, whether the op fits in what is
+;; left of the budget. Everything else about metering -- which ops, in what
+;; order, what they do -- is the caller's. THIS is the part where two
+;; implementations disagreeing means two replicas commit different state, so
+;; this is the part that gets a second, independent implementation and a
+;; conformance test rather than a comment saying it is simple.
+;;
+;; Pure i64 arithmetic. No capability is declared because none is needed: a
+;; state machine does not perform effects, and the compiler's deny-by-default
+;; policy therefore has nothing to grant. `kotoba compile --target wasm32`
+;; takes this as-is.
+
+;; Does one more op at `cost` fit? 1 = yes, 0 = no.
+;;
+;; The comparison is `>` on the SUM, not `>=` on the remainder: charging
+;; before the op is what makes `budget` a real ceiling instead of an
+;; approximate one, and the boundary case (spent + cost exactly equals
+;; budget) must fit.
+(defn fits [spent :i64 cost :i64 budget :i64] :i64
+  (if (> (+ spent cost) budget) 0 1))
+
+;; How many of `n` ops at fixed `cost` are applied under `budget`.
+;;
+;; Tail-recursive: the same loop `apply-metered` runs, expressed where the
+;; result cannot depend on a host. Returns `n` when every op fit, and the
+;; index of the first op that did not otherwise -- which is exactly
+;; `:exhausted-at`.
+(defn applied-from [n :i64 cost :i64 budget :i64 spent :i64 i :i64] :i64
+  (if (>= i n)
+    i
+    (if (> (+ spent cost) budget)
+      i
+      (applied-from n cost budget (+ spent cost) (+ i 1)))))
+
+(defn applied [n :i64 cost :i64 budget :i64] :i64
+  (applied-from n cost budget 0 0))
+
+;; Spent after `applied` ops. Kept separate rather than returned as a pair so
+;; the module stays inside the scalar subset every backend supports.
+(defn spent [n :i64 cost :i64 budget :i64] :i64
+  (* cost (applied n cost budget)))
+
+(defn main [] :i64
+  (applied 10 2 7))

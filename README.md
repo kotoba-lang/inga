@@ -228,12 +228,37 @@ exactly three inputs — budget, cost function, op order — and nothing else. C
 is charged *before* the op, which is what makes the budget a real ceiling
 rather than an approximate one.
 
-**Not yet a `.kotoba` machine.** F2's endpoint is the machine body compiled to
-fuel-metered Kotoba; today the compiler's capability kits are `:reference
-:implemented` with `:wasm-aot`/`:native-aot` pending, and there is no
-fs/process capability or Kotoba script host to run a build from. What is here
-is the metering contract and the determinism property at the seam — which is
-what consensus needs — and the remaining step is named rather than implied.
+**The arithmetic now has a Kotoba implementation.** `kotoba/fuel.kotoba`
+compiles with `kotoba compile --target wasm32` and the resulting
+`kotoba/fuel.wasm` is checked in, the same way `gftdcojp/engi` checks in its
+settlement module. `inga.fuel-kotoba-test` instantiates that binary and
+compares it against `inga.fuel` across a 120-case matrix; the Kotoba module is
+the reference, and if they ever disagree the Kotoba answer is the correct one.
+
+This was previously written up here as *blocked* on the compiler's capability
+kits. That was wrong, and only checking found out: those blockers are about
+**effects**, and a state machine performs none — so no capability is declared,
+the deny-by-default policy has nothing to grant, and the module compiles as-is.
+
+**What checking also found: the compiler's fuel is not inga's fuel.** A
+compiled module carries its own budget per instance and traps with
+`unreachable` when it runs out — measured at 42 calls of `applied(10,1,100)`
+on one instance. That is the compiler doing its job, and it is exactly the
+failure `inga.fuel` forbids:
+
+| | exhaustion is | who can check it |
+|---|---|---|
+| `inga.fuel` | a **value** folded into the state root | any peer |
+| compiler fuel | a **trap** | nobody, after the fact |
+
+So any deployment running the machine as a Kotoba module must give every
+replica the **same initial fuel** (`--fuel` / `--fuel-initial`), or replicas
+trap at different call counts and diverge for a reason that has nothing to do
+with the transactions. A test pins the trap behaviour so this note cannot go
+stale silently.
+
+Still not a full `.kotoba` machine body: the fold is metered in Kotoba, the
+op application is still cljc.
 
 ### F3 — the power table is committed state
 
