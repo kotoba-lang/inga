@@ -32,6 +32,9 @@ followed from that cause.
 |---|---|
 | `inga.head` | the head record a quorum certifies — `kotobase.head/v1` with `issuer`/`sig` widened to a quorum certificate |
 | `inga.ref` | a `kotobase.storage.core/IRefStore` whose compare-and-set is decided by the quorum, declaring `:linearizable-ref` |
+| `inga.state` | **F1** — the committed state root as a real CID, over `arrangement`'s 4 content-addressed indices; plus the `:cid` / `:opaque` distinction that gates what may back a kotobase ref |
+| `inga.fuel` | **F2** — metered execution where running out is a *state transition*, never an exception |
+| `inga.power` | **F3** — the power table as committed state, and a `:storage` role on the existing bond market |
 
 Pure `.cljc`. No I/O, no crypto, no wall-clock — signature verification and
 the quorum itself are injected, the same seam `kotobase.storage.signed-head`
@@ -86,7 +89,7 @@ This is what makes **ADR-2608039000** (`blockchain / 分散型経路に D1 を�
 ## Verification
 
 ```bash
-clojure -M:test    # 15 tests, 45 assertions
+clojure -M:test    # 42 tests, 124 assertions
 ```
 
 The acceptance test is **kotobase's own conformance suite**, not one written
@@ -130,14 +133,103 @@ premises are different claims. Do not describe deployments using this library
 as "distributed" or "decentralized" until independent third-party operators
 with economic exposure exist (that ADR's Phase 4).
 
+## The Filecoin half — F1 / F2 / F3
+
+ADR-2608038000 names three things Filecoin's SPC / FVM / FEVM contribute that
+a chained-HotStuff ordering layer does not. All three are here; each composes
+with something that already existed rather than reinventing it.
+
+### F1 — the state root is a CID, not a digest
+
+A machine seam returning `"113:c51298e1"` lets replicas **compare** state and
+nothing else — they cannot sync it, query it, serve it, or point a ref at it.
+Filecoin's on-chain state is an IPLD structure, so a state root is something
+you can walk; FEVM maps `SLOAD`/`SSTORE` onto that instead of a
+Merkle-Patricia Trie, and pays exactly one method for it (`eth_getProof`).
+
+`inga.state` takes the same shape and **introduces no HAMT** — the workspace
+already has content-addressed maps. `kotoba-lang/arrangement` already
+snapshots a 4-index datom db into prolly-trees, CID-addresses the commit
+(dag-cbor of `{schema-version index-roots prev}`, every root a real tag-42
+IPLD link), restores from it, and queries it with Datalog. None of that is
+rewritten; `inga.state` wires it to the machine seam.
+
+The added distinction is **`:root-kind`**. A machine declares `:cid`
+(hydratable) or `:opaque` (a digest — still legal; a typed-array order book is
+not obliged to become datoms to reach consensus). `assert-hydratable!` refuses
+`:opaque` for anything backing a kotobase ref, which turns ADR-2608038000 D6's
+"F1 must come before D6" from something a reader remembers into something the
+code holds.
+
+Acceptance test, as the ADR stated it — four replicas reach the same CID **and
+the state hydrated from that CID answers Datalog**:
+
+```clojure
+(is (= 1 (count (set roots))))                     ; one root across four runs
+(let [restored ((:hydrate-fn m) root identity)]    ; a reader with only the CID
+  (state/query restored {:find '[?s] :where '[[?s "role" "witness"]]}))
+;; => #{["alice"] ["bob"]}
+```
+
+### F2 — running out of fuel is a state transition, not an exception
+
+An arbitrary `apply-fn` bounds no work and guarantees no agreement between two
+implementations. engi hit the second half for real: a machine map holding a
+ready-made order book handed every replica the *same mutable structure*, and
+four replicas agreeing on 123 committed blocks differed by 200 resting orders.
+
+Filecoin's FVM answers this by metering every operation, so determinism is a
+property of the VM rather than of each actor's care. Kotoba already has the
+primitive — the compiler's native backends implement fuel accounting.
+
+`inga.fuel`'s one rule: **exhaustion is a value in the state, never a throw.**
+A replica that throws has left the protocol — it produces no state and no root
+while its peers produce both. So `apply-metered` stops, records where, and
+`record` folds that into the state the root commits to. Determinism depends on
+exactly three inputs — budget, cost function, op order — and nothing else. Cost
+is charged *before* the op, which is what makes the budget a real ceiling
+rather than an approximate one.
+
+**Not yet a `.kotoba` machine.** F2's endpoint is the machine body compiled to
+fuel-metered Kotoba; today the compiler's capability kits are `:reference
+:implemented` with `:wasm-aot`/`:native-aot` pending, and there is no
+fs/process capability or Kotoba script host to run a build from. What is here
+is the metering contract and the determinism property at the seam — which is
+what consensus needs — and the remaining step is named rather than implied.
+
+### F3 — the power table is committed state
+
+`engi.stake` already implements permissionless admission by external
+collateral, stake-weighted quorum, equivocation-only slashing, and a
+role-tagged single bond market. **None of that economics is reimplemented
+here.** The one thing it cannot do by itself is the thing F3 is about: it is
+*handed* the bond map from outside, so who is a witness is decided somewhere
+the consensus does not order — and a validator set is not a thing peers may
+disagree about, because it is what quorum is counted against.
+
+`inga.power` is the table plus the transition function a machine applies, so
+the table at height *h* is a function of the committed prefix and nothing
+else. `:storage` joins `:ordering` and `:recompute` on the **existing** market
+— SPC's idea that the Sybil-resistant resource should be the useful work the
+network does, which here is retaining and serving datom blocks.
+
+It does **not** replace external collateral (engi's reason for bonding USDC
+rather than EN is unchanged: EN nets to zero, so bonding it disincentivises
+nothing), and `:storage` power is credited by attested retrieval sampling —
+the shape `:recompute` already uses — **not** PoRep/PoSt. No deployment using
+this may claim Filecoin-equivalent storage guarantees.
+
 ## Not here yet
 
-Per ADR-2608038000, in order:
+**Extraction** — `engi.{consensus,quorum,pacemaker,replica,sync,wire,net,attest,stake,parity}`
+(3,166 lines of chained HotStuff, already running: 4 replicas, real WebSockets,
+real keys, agreeing on a live exchange's state) move here. `engi` is under
+active daily development and the extraction has to land `engi` and `torihiki`
+together, so it waits for that repo to quiesce.
 
-1. **Extraction** — `engi.{consensus,quorum,pacemaker,replica,sync,wire,net,attest,stake,parity}` (3,166 lines of chained HotStuff, already running: 4 replicas, real WebSockets, real keys, agreeing on a live exchange's state) move here. Not done yet: `engi` is under active daily development and the extraction has to land `engi` and `torihiki` together.
-2. **F1** — state root from an opaque digest to a content-addressed CID (`prolly-tree` / `arrangement`). No new HAMT; the workspace already has content-addressed maps. **`inga.ref` is usable today, but wiring it to kotobase's actual datom plane needs F1**, because a ref must point at something hydratable.
-3. **F2** — the state machine as a fuel-metered `.kotoba` module (the compiler's native backends already meter fuel).
-4. **F3** — the power table inside committed state; a `:storage` role on the existing bond market.
+Until then **inga contains no consensus** — F1/F2/F3 are the state, execution
+and membership planes a consensus drives, and the reference quorum in the
+tests is a cooperative oracle, not agreement.
 
 ## License
 

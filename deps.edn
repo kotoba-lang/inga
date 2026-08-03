@@ -11,7 +11,15 @@
 {:paths ["src"]
  :deps {io.github.kotoba-lang/kotobase-storage
         {:git/url "https://github.com/kotoba-lang/kotobase-storage.git"
-         :git/sha "f41e7bd3dfc8547614c6adc843c9d5fd1290687f"}}
+         :git/sha "f41e7bd3dfc8547614c6adc843c9d5fd1290687f"}
+        ;; F1: the content-addressed state root. arrangement already snapshots a
+        ;; 4-index datom db into prolly-trees, CID-addresses the commit, restores
+        ;; from it, and queries it with Datalog. inga wires it to the machine seam
+        ;; and adds the :cid vs :opaque distinction -- it does not reimplement any
+        ;; of that (ADR-2608038000 F1 explicitly declines to introduce a HAMT).
+        io.github.kotoba-lang/arrangement
+        {:git/url "https://github.com/kotoba-lang/arrangement.git"
+         :git/sha "096523fb2d57b57d89da88a47c07e6bc008c2285"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
