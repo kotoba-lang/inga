@@ -11,7 +11,9 @@
             [inga.attest :as att]
             [inga.consensus :as c]
             [inga.pacemaker :as pm]
+            [inga.head :as head]
             [inga.quorum :as q]
+            [inga.ref :as iref]
             [inga.state :as state]
             [inga.state-test :as state-test]
             [clojure.string]
@@ -1092,3 +1094,64 @@
                                                         {:find '[?s] :where '[[?s "role" "witness"]]})
                                            ["alice"]))
                             (done))))))))
+
+;; ── the ref plane on the real commit rule ────────────────────────────────────
+;;
+;; `inga.ref`'s conformance run uses a cooperative reference quorum, and says
+;; so: an agreeable oracle is the easiest way to believe something false. This
+;; replaces it with agreement. Two writers race the same sequence, the network
+;; orders them, and the projection decides — no oracle anywhere.
+
+(defn- head-record-for [ref-name seq cid]
+  (assoc (head/head-record {:ref-name ref-name :seq seq :cid cid
+                            :prev nil :height nil})
+         "cert" {:sigs [{:witness "w1" :sig "s"}]}))
+
+(defn- committed-records
+  "Head records carried by a replica's committed blocks, in committed order."
+  [state]
+  (->> (:committed state)
+       (mapcat :inga.block/proposals)
+       (keep #(get {"head-0-a" (head-record-for "main" 0 "cid-a")
+                    "head-0-b" (head-record-for "main" 0 "cid-b")
+                    "head-1"   (head-record-for "main" 1 "cid-next")} %))))
+
+(deftest two-writers-race-a-sequence-and-the-commit-rule-decides
+  (let [rs0 (net)
+        leader (c/leader-for (vec witnesses) 1)
+        ;; Both writers propose sequence 0 for DIFFERENT cids. Neither can be
+        ;; refused on shape; only the order can separate them.
+        seeded (update rs0 leader #(-> % (r/submit "head-0-a") (r/submit "head-0-b")))
+        [s0 out] (r/start (get seeded leader) 1000)
+        [rs _ _] (deliver-all (assoc seeded leader s0)
+                              (mapv #(assoc % :from leader) out) 1000 4000)
+        per-replica (map (fn [s] (iref/project (committed-records s))) (vals rs))]
+    (is (pos? (count (:committed (first (vals rs))))) "the network committed something")
+    (testing "every replica projects the same winner, because they agreed on the order"
+      (is (= 1 (count (set (map #(get-in % ["main" 0 "cid"]) per-replica))))))
+    (let [p (first per-replica)
+          a (head-record-for "main" 0 "cid-a")
+          b (head-record-for "main" 0 "cid-b")
+          oa (iref/outcome p a) ob (iref/outcome p b)]
+      (is (not= (:certified? oa) (:certified? ob))
+          "exactly one of the two writers won -- the commit rule is the CAS")
+      (let [loser (if (:certified? oa) ob oa)
+            winner-cid (get-in p ["main" 0 "cid"])]
+        (is (= winner-cid (:current loser))
+            "and the loser is told which head actually holds its sequence")))))
+
+(deftest a-gap-in-the-sequence-is-not-a-head
+  (testing "treating a later record as the head across a gap would let a writer
+            skip a sequence and silently drop whatever it should have held"
+    (let [p (iref/project [(head-record-for "main" 1 "cid-next")])]
+      (is (nil? (iref/head-of p "main"))))
+    (let [p (iref/project [(head-record-for "main" 0 "cid-a")
+                           (head-record-for "main" 1 "cid-next")])]
+      (is (= "cid-next" (get (iref/head-of p "main") "cid"))))))
+
+(deftest first-wins-is-the-compare-and-set
+  (testing "last-wins would let a writer that lost the ordering overwrite the
+            winner by proposing again -- the lost update this plane prevents"
+    (let [p (iref/project [(head-record-for "main" 0 "cid-a")
+                           (head-record-for "main" 0 "cid-b")])]
+      (is (= "cid-a" (get-in p ["main" 0 "cid"]))))))

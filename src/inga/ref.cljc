@@ -125,3 +125,68 @@
     (throw (ex-info "inga.ref: quorum must be a positive integer"
                     {:type :inga.ref/invalid-quorum :quorum quorum})))
   (->QuorumRefStore read-head! write-head! propose! verify-fn quorum height-fn))
+
+;; ── the ref as a projection of the committed log ────────────────────────────
+;;
+;; `propose!` above is injected, and until now the only thing that implemented
+;; it was a cooperative oracle in the tests. That is a real gap and it was the
+;; whole reason `inga.ref`'s docstring says this namespace "contains no
+;; consensus": the adapter was correct and connected to nothing.
+;;
+;; What consensus actually gives a ref is not a round trip. It gives a TOTAL
+;; ORDER, and a total order already decides the question: for each `[ref seq]`
+;; the FIRST record to appear in the committed prefix wins, and every later
+;; one for that seq loses. There is nothing to vote on separately.
+;;
+;; So the pure half lives here — projection and outcome — and the waiting
+;; lives in the host, which is where it has to: `-compare-and-set-ref!` is
+;; synchronous and a commit is not. A host's `propose!` is
+;;
+;;     submit the record  →  await the block that carries it  →  (outcome …)
+;;
+;; and nothing about that sequence should be re-derived per deployment.
+
+(defn project
+  "Fold committed head records into `{ref-name {seq record}}`, FIRST WINS.
+
+  `records` is already-decoded head records in committed order — the caller
+  owns how a block's proposals become records, exactly as `inga.state` makes
+  the caller own `decode-block`, and for the same reason.
+
+  First-wins rather than last-wins is the entire compare-and-set. Last-wins
+  would let a writer that lost the ordering overwrite the winner by simply
+  proposing again, which is the lost update this plane exists to prevent."
+  [records]
+  (reduce (fn [acc r]
+            (let [ref-name (get r "ref") s (get r "seq")]
+              (if (get-in acc [ref-name s])
+                acc                                   ; someone got here first
+                (assoc-in acc [ref-name s] r))))
+          {}
+          records))
+
+(defn head-of
+  "The highest CONTIGUOUS head for `ref-name` in a projection, or nil.
+
+  Contiguous, not highest: a gap means the record at the missing sequence was
+  never committed, and treating a later one as the head would let a writer
+  skip a sequence and silently drop whatever the gap should have contained."
+  [projection ref-name]
+  (let [by-seq (get projection ref-name)]
+    (loop [s 0 last nil]
+      (if-let [r (get by-seq s)]
+        (recur (inc s) r)
+        last))))
+
+(defn outcome
+  "Did `record` win its sequence? The shape `propose!` must return.
+
+  A loser is told the CID that actually holds its sequence, not merely that it
+  failed — a caller that only learns `false` retries against the same base
+  forever."
+  [projection record]
+  (let [winner (get-in projection [(get record "ref") (get record "seq")])]
+    (cond
+      (nil? winner) {:certified? false :current (get (head-of projection (get record "ref")) "cid")}
+      (= winner record) {:certified? true :cert (get record "cert")}
+      :else {:certified? false :current (get winner "cid")})))

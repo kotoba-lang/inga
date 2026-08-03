@@ -143,16 +143,42 @@ here:
 JVM threads racing the same expected head — and found exactly one winner, with
 every loser observing that winner.
 
-### What that does NOT establish
+### The oracle is gone: the commit rule is the CAS
 
-**This repo is the adapter. It contains no consensus.** Safety — that two
+`inga.ref`'s `propose!` is injected, and for a while the only thing that
+implemented it was the cooperative oracle in its own tests — the adapter was
+correct and connected to nothing.
+
+What consensus gives a ref is not a round trip. It gives a **total order**,
+and a total order already decides the question: for each `[ref seq]` the
+**first** record in the committed prefix wins and every later one loses. There
+is nothing to vote on separately. So `inga.ref/project` + `outcome` are the
+pure half, and the waiting stays in the host, because
+`-compare-and-set-ref!` is synchronous and a commit is not:
+
+```
+submit the record → await the block that carries it → (outcome projection record)
+```
+
+`two-writers-race-a-sequence-and-the-commit-rule-decides` runs that on the
+real replica network: two writers propose **different** cids at sequence 0,
+neither refusable on shape, and only the order can separate them. Every
+replica projects the same winner, exactly one writer is certified, and the
+loser is told which head actually holds its sequence — a caller that only
+learns `false` retries against the same base forever.
+
+First-wins, not last-wins, is the whole compare-and-set: last-wins would let a
+writer that lost the ordering overwrite the winner by proposing again.
+
+### What that still does NOT establish
+
+**The conformance suite's quorum is still an oracle.** Safety — that two
 conflicting certificates at the same height can never both form — is a
-property of the quorum behind `propose!`, proved in that layer's own
-equivocation tests. The suite here runs against a **reference quorum**: a
-cooperative oracle that models at-most-one-per-height and nothing else. It
-checks that the adapter refuses a loser, reports the winning head so a caller
-can retry against the right base, and never claims a publish it cannot read
-back.
+`kotobase.storage.contract/verify` runs against a cooperative reference
+quorum that models at-most-one-per-height and nothing else. It checks that the
+ADAPTER refuses a loser, reports the winning head, and never claims a publish
+it cannot read back — it is not evidence about agreement. The evidence about
+agreement is the test above, on the real commit rule.
 
 Passing a conformance suite with an agreeable oracle is the easiest way to
 believe something false, so the claim is stated narrowly on purpose.
