@@ -502,6 +502,21 @@
       (cast-vote (note-proposal (extend-chain state block) block :voted)
                  block now))))
 
+(defn- known-evidence?
+  "Have we already recorded an equivocation by this witness at this height?
+
+  Keyed by `[witness height]` rather than by the whole proof: two different
+  pairs of conflicting votes at one height are the same crime, and treating
+  them as two would let an equivocator inflate the record — and, worse, keep
+  re-triggering a forward."
+  [state {:inga.evidence/keys [witness height]}]
+  (some #(and (= witness (:inga.evidence/witness %))
+              (= height (:inga.evidence/height %)))
+        (:equivocations state)))
+
+(defn- record-evidence [state e]
+  (update state :equivocations conj e))
+
 (defn- fold-vote
   "Collect a vote and, on quorum, form the certificate.
 
@@ -575,12 +590,17 @@
        ;; Both signed, both verifying, both from this witness at this height,
        ;; for different blocks. Refused, and kept: an equivocator that is
        ;; merely ignored pays nothing and can do it again next height.
-       [(update state :equivocations conj
-                {:inga.evidence/witness witness
-                 :inga.evidence/height height
-                 :inga.evidence/vote-a prior
-                 :inga.evidence/vote-b vote})
-        []]
+       (let [e {:inga.evidence/witness witness
+                :inga.evidence/height height
+                :inga.evidence/vote-a prior
+                :inga.evidence/vote-b vote}]
+         ;; Broadcast, not just kept. Evidence that stays in the replica that
+         ;; happened to receive both votes punishes nobody: the equivocator
+         ;; only has to make sure no single peer sees both, which is a routing
+         ;; property it can influence. Forwarding is what makes the proof a
+         ;; network fact instead of one node's private opinion.
+         [(record-evidence state e)
+          [{:to :all :msg {:type :evidence :evidence e}}]])
     (let [state (assoc-in state [:first-vote [witness height]]
                           (or prior vote))
           state (update-in state [:votes block-hash] (fnil assoc {}) witness
@@ -862,6 +882,54 @@
           (vote-on-tip now))
       [state []])))
 
+(defn- vote-verifier
+  "A `(fn [vote] boolean)` for `inga.stake/verify-equivocation-evidence`,
+  built from the seams this replica already has.
+
+  When no `verify-fn` is configured this accepts everything, exactly as vote
+  folding does. That is right for replaying a history this replica already
+  agreed to and wrong for anything else — and for evidence it is wronger than
+  for votes, because unverifiable evidence is how one node frames another. The
+  structural checks in `verify-equivocation-evidence` still apply, so an
+  unconfigured replica cannot be told that a witness equivocated with itself,
+  but it CAN be handed forged signatures. Configure a verifier."
+  [state]
+  (let [verify (:verify-fn state)]
+    (fn [v]
+      (or (nil? verify)
+          (boolean
+           (verify (:inga.vote/witness v)
+                   (att/vote-payload (:chain-id state)
+                                     (or (:inga.vote/view v) 0)
+                                     (:inga.vote/height v)
+                                     (:inga.vote/block-hash v)
+                                     (:inga.vote/witness v))
+                   (:inga.vote/sig v)))))))
+
+(defn handle-evidence
+  "Fold equivocation evidence from a peer.
+
+  Three things have to hold, and each one is a way this could otherwise be
+  abused:
+
+  1. **Verify before recording.** `inga.stake/verify-equivocation-evidence`
+     re-checks the whole claim — same witness, same height, different blocks,
+     both signatures valid — rather than trusting that the sender ran
+     detection. Without this, evidence is a way to accuse anyone of anything.
+  2. **Record once per `[witness height]`.** See `known-evidence?`.
+  3. **Forward only on FIRST sight.** A replica that re-broadcasts everything
+     it receives turns one proof into a permanent storm between peers. First
+     sight forwards; every copy after is absorbed."
+  [state {:keys [evidence]}]
+  (cond
+    (nil? evidence) [state []]
+    (known-evidence? state evidence) [state []]
+    (not (stake/verify-equivocation-evidence evidence (vote-verifier state)))
+    [(update-in state [:dropped-evidence :did-not-verify] (fnil inc 0)) []]
+    :else
+    [(record-evidence state evidence)
+     [{:to :all :msg {:type :evidence :evidence evidence}}]]))
+
 (defn on-message
   "Fold one decoded message. Returns `[state' outbox]`.
 
@@ -874,6 +942,7 @@
     :new-view (handle-new-view state msg now)
     :sync-request (handle-sync-request state msg)
     :sync-response (handle-sync-response state msg now)
+    :evidence (handle-evidence state msg)
     [state []]))
 
 (defn on-tick

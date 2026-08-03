@@ -43,7 +43,7 @@
   "Closed set. An unknown type is refused rather than ignored: silently
   dropping what you do not understand is how two versions of a protocol run
   side by side believing they agree."
-  #{"proposal" "vote" "new-view" "sync-request" "sync-response"})
+  #{"proposal" "vote" "new-view" "sync-request" "sync-response" "evidence"})
 
 (def reasons
   #{:not-a-map :unknown-type :missing-field :bad-type :too-large :bad-shape})
@@ -182,6 +182,20 @@
     :new-view (cond-> {"t" "new-view" "witness" (wire-id (:witness msg))
                        "view" (:view msg) "high-qc" (enc-qc (:high-qc msg))}
                 (:sig msg) (assoc "sig" (str (:sig msg))))
+    ;; Equivocation evidence, carried whole. Both votes travel with their
+    ;; signatures because the proof has to be checkable by a replica that
+    ;; never saw either vote -- that is the entire point of forwarding it.
+    :evidence (let [e (:evidence msg)
+                    enc-vote (fn [v] (cond-> {"witness" (wire-id (:inga.vote/witness v))
+                                              "block-hash" (:inga.vote/block-hash v)
+                                              "height" (:inga.vote/height v)
+                                              "view" (or (:inga.vote/view v) 0)}
+                                       (:inga.vote/sig v) (assoc "sig" (str (:inga.vote/sig v)))))]
+                {"t" "evidence"
+                 "witness" (wire-id (:inga.evidence/witness e))
+                 "height" (:inga.evidence/height e)
+                 "vote-a" (enc-vote (:inga.evidence/vote-a e))
+                 "vote-b" (enc-vote (:inga.evidence/vote-b e))})
     :sync-request {"t" "sync-request" "from" (:from msg) "to" (:to msg)}
     :sync-response {"t" "sync-response" "blocks" (mapv enc-block (:blocks msg))}
     (throw (ex-info "inga.wire: cannot encode unknown message type"
@@ -232,6 +246,33 @@
            [(cond-> {:type :new-view :witness (get m "witness")
                      :view (get m "view") :high-qc high}
               (get m "sig") (assoc :sig (get m "sig"))) nil]
+           [nil :bad-shape]))
+
+       "evidence"
+       (let [dec-vote (fn [v]
+                        (when (and (map? v)
+                                   (str-ok? (get v "witness") limits)
+                                   (str-ok? (get v "block-hash") limits)
+                                   (nat? (get v "height"))
+                                   (nat? (get v "view"))
+                                   (or (nil? (get v "sig")) (str-ok? (get v "sig") limits)))
+                          (cond-> {:inga.vote/witness (get v "witness")
+                                   :inga.vote/block-hash (get v "block-hash")
+                                   :inga.vote/height (get v "height")
+                                   :inga.vote/view (get v "view")}
+                            (get v "sig") (assoc :inga.vote/sig (get v "sig")))))
+             a (dec-vote (get m "vote-a"))
+             b (dec-vote (get m "vote-b"))]
+         ;; Shape only. Whether this is a REAL equivocation -- same witness,
+         ;; same height, different blocks, both signatures valid -- is
+         ;; `inga.stake/verify-equivocation-evidence`'s call, and a replica
+         ;; that recorded it on shape alone would let anyone frame anyone.
+         (if (and (str-ok? (get m "witness") limits) (nat? (get m "height")) a b)
+           [{:type :evidence
+             :evidence {:inga.evidence/witness (get m "witness")
+                        :inga.evidence/height (get m "height")
+                        :inga.evidence/vote-a a
+                        :inga.evidence/vote-b b}} nil]
            [nil :bad-shape]))
 
        "sync-request"

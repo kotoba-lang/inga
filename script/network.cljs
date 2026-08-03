@@ -127,6 +127,13 @@
   ;; losing any one of them to an eviction stops the chain outright.
   (or (some-> js/process .-env .-BYZANTINE) "w4"))
 
+(def split?
+  "`BYZANTINE_SPLIT=1` sends the equivocator's second vote to ONE peer instead
+  of all of them. Without evidence propagation only that peer can ever hold a
+  proof; with it, every honest replica does. That difference is the whole
+  reason `:evidence` is a message type."
+  (= "1" (some-> js/process .-env .-BYZANTINE_SPLIT)))
+
 (def equivocation-hash
   "The block w4 casts its second vote for. Nobody proposed it."
   "0000equivocation0000equivocation0000equivocation0000equivocation")
@@ -237,9 +244,24 @@
                                           (att/vote-payload
                                            chain-id (:view msg) (:height msg)
                                            equivocation-hash (wire/wire-id w))))]
-                    (when-let [n @out-node] ((:broadcast! n) twin))
-                    (doseq [[_ s] @registry]
-                      (when (:send! s) ((:send! s) twin)))))))
+                    (if split?
+                      ;; SPLIT: hand the twin to ONE peer instead of all.
+                      ;;
+                      ;; Broadcasting both votes to everyone makes every honest
+                      ;; replica an independent detector, which is a kind
+                      ;; test: it never asks whether a proof can travel. An
+                      ;; equivocator with any influence over routing does the
+                      ;; opposite -- it makes sure no single peer holds both
+                      ;; halves. Then the only way anyone is caught is if the
+                      ;; one replica that saw both TELLS the others, which is
+                      ;; what `:evidence` is for.
+                      (let [targets (->> @registry (sort-by key) (map val)
+                                         (filter :send!))]
+                        (when-let [t (first targets)] ((:send! t) twin)))
+                      (do
+                        (when-let [n @out-node] ((:broadcast! n) twin))
+                        (doseq [[_ s] @registry]
+                          (when (:send! s) ((:send! s) twin)))))))))
             (feed! [msg]
               (swap! recv inc)
               (let [[s' out] (r/on-message @state msg (now))]

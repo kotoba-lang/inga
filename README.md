@@ -339,6 +339,35 @@ from the consensus set, which is why the cut was clean — but it also means
 inga's consumer today is the torihiki harness, not the ENGI ledger. Running
 ENGI/EN *on* inga is future work.
 
+### Evidence propagates
+
+An equivocation used to be recorded by whichever replica happened to receive
+both conflicting votes, and go no further. That punishes nobody: the
+equivocator only has to keep any single peer from seeing both, which is a
+routing property it can influence.
+
+`:evidence` is now a wire message. A replica that detects an equivocation
+broadcasts the proof; a replica that receives one **verifies it before
+recording** (`inga.stake/verify-equivocation-evidence` re-checks the whole
+claim — same witness, same height, different blocks, both signatures — because
+otherwise evidence is a way to accuse anyone of anything), records once per
+`[witness height]`, and forwards **only on first sight**, so one proof does not
+become a permanent storm between peers.
+
+`script/network.cljs` grew a `BYZANTINE_SPLIT=1` mode that sends the
+equivocator's second vote to **one** peer instead of all — the case the
+original harness never created, because broadcasting both votes to everyone
+makes every replica an independent detector and never asks whether a proof can
+travel. Measured over real sockets:
+
+| `BYZANTINE_SPLIT=1` | w1 | w2 | w3 | |
+|---|---|---|---|---|
+| without propagation | 14 | **0** | **0** | `NETWORK: FAIL` |
+| with propagation | 36 | 8 | 23 | `NETWORK: pass` |
+
+Without it, an equivocator that routes its two votes to different peers escapes
+entirely.
+
 Still open, from the same ADR: `:storage` power has no retrieval-sampling implementation; the `.kotoba`
 machine body is blocked on the compiler; bond collateral is not deployed, so
 **slashing is implemented and does not fire**; equivocation evidence is

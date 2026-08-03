@@ -918,3 +918,82 @@
                                   :height 1 :view 0} 1000)]
       (is (empty? (get-in s' [:votes "h:a"])))
       (is (= 1 (get-in s' [:dropped-votes :unsigned]))))))
+
+;; ── evidence propagates ──────────────────────────────────────────────────────
+;;
+;; Until this existed, an equivocation was recorded by whichever replica
+;; happened to receive both conflicting votes and went no further. That
+;; punishes nobody: the equivocator only has to keep any single peer from
+;; seeing both, which is a routing property it can influence.
+
+(defn- conflicting-votes [witness height]
+  [{:inga.vote/witness witness :inga.vote/height height :inga.vote/view 0
+    :inga.vote/block-hash "block-a" :inga.vote/sig "sig-a"}
+   {:inga.vote/witness witness :inga.vote/height height :inga.vote/view 0
+    :inga.vote/block-hash "block-b" :inga.vote/sig "sig-b"}])
+
+(defn- evidence-for [witness height]
+  (let [[a b] (conflicting-votes witness height)]
+    {:inga.evidence/witness witness :inga.evidence/height height
+     :inga.evidence/vote-a a :inga.evidence/vote-b b}))
+
+(defn- receiver
+  "A replica with no signature verifier, so `vote-verifier` accepts and these
+  tests exercise the PROPAGATION rules rather than the crypto. The one test
+  that cares about verification installs its own `:verify-fn`."
+  []
+  (r/replica {:witness :w1 :witnesses [:w1 :w2 :w3 :w4]
+              :quorum (c/quorum-size 4) :hash-fn hash-fn}))
+
+(deftest evidence-from-a-peer-is-recorded-and-forwarded-once
+  (let [[s1 out1] (r/on-message (receiver)
+                                {:type :evidence :evidence (evidence-for :w9 7)} 0)]
+    (is (= #{:w9} (r/equivocators s1))
+        "a replica that never saw either vote now holds the proof")
+    (is (= [{:to :all}] (mapv #(select-keys % [:to]) out1))
+        "and passes it on, once")
+    (testing "the second copy is absorbed"
+      (let [[s2 out2] (r/on-message s1 {:type :evidence :evidence (evidence-for :w9 7)} 0)]
+        (is (= 1 (count (:equivocations s2))) "not recorded twice")
+        (is (= [] out2) "and not forwarded again -- otherwise one proof is a storm")))))
+
+(deftest a-different-pair-at-the-same-height-is-the-same-crime
+  (let [[s1 _] (r/on-message (receiver)
+                             {:type :evidence :evidence (evidence-for :w9 7)} 0)
+        other (assoc-in (evidence-for :w9 7)
+                        [:inga.evidence/vote-b :inga.vote/block-hash] "block-c")
+        [s2 out] (r/on-message s1 {:type :evidence :evidence other} 0)]
+    (is (= 1 (count (:equivocations s2)))
+        "two conflicting pairs at one height are one equivocation, not two")
+    (is (= [] out) "and re-forwarding on each new pair would be a way to keep the storm alive")))
+
+(deftest evidence-that-does-not-verify-is-refused
+  (testing "otherwise evidence is a way to accuse anyone of anything"
+    (let [state (assoc (receiver) :verify-fn (constantly false))
+          [s out] (r/on-message state {:type :evidence :evidence (evidence-for :w9 7)} 0)]
+      (is (= [] (:equivocations s)) "not recorded")
+      (is (= [] out) "and not forwarded")
+      (is (= 1 (get-in s [:dropped-evidence :did-not-verify]))
+          "dropping is counted, not silent"))))
+
+(deftest evidence-naming-one-witness-twice-for-one-block-is-not-equivocation
+  (let [same (let [e (evidence-for :w9 7)]
+               (assoc-in e [:inga.evidence/vote-b :inga.vote/block-hash] "block-a"))
+        [s out] (r/on-message (receiver) {:type :evidence :evidence same} 0)]
+    (is (= [] (:equivocations s)) "voting the same way twice is not a crime")
+    (is (= [] out))))
+
+(deftest detecting-an-equivocation-broadcasts-it
+  (testing "the detector no longer keeps the proof to itself"
+    (let [w :w9
+          base (receiver)
+          [a b] (conflicting-votes w 7)
+          to-msg (fn [v] {:type :vote :witness (:inga.vote/witness v)
+                          :block-hash (:inga.vote/block-hash v)
+                          :height (:inga.vote/height v) :view (:inga.vote/view v)
+                          :sig (:inga.vote/sig v)})
+          [s1 _] (r/on-message base (to-msg a) 0)
+          [s2 out2] (r/on-message s1 (to-msg b) 0)]
+      (is (= 1 (count (:equivocations s2))))
+      (is (some #(= :evidence (:type (:msg %))) out2)
+          "and the proof leaves this replica"))))
