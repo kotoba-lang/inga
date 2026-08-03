@@ -1,9 +1,9 @@
 (ns inga.attest.ed25519
-  "Ed25519 through WebCrypto — the only place in engi that knows what a curve
+  "Ed25519 through WebCrypto — the only place in inga that knows what a curve
   is.
 
-  Named under `inga.attest` rather than beside the existing `inga.crypto`
-  (which is kotobase's client-side key handling) because what it implements is
+  Named under `inga.attest` rather than beside engi's `engi.crypto`
+  (kotobase's client-side key handling, which stayed in that repo) because what it implements is
   the verifier `inga.attest` takes as a parameter, and a name that says so is
   worth more than a name that groups by subject matter.
 

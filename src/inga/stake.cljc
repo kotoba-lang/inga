@@ -2,7 +2,7 @@
   "Permissionless witness admission via external-collateral bonding, plus
   equivocation-only slashing (ADR-2607994000). Pure: no I/O, no crypto, no
   wall-clock — bond-balance verification and signature checking are both
-  injected by the caller, same seam `inga.core/fold-balance` already uses
+  injected by the caller, same seam `engi.core/fold-balance` already uses
   for its optional `:hash-fn`.
 
   Bond asset is EXTERNAL COLLATERAL (e.g. USDC on Base L2 — reusing
@@ -116,7 +116,7 @@
 ;; revisiting it, rather than a number invented to look prudent.
 ;;
 ;; The trigger is now measurable, which it was not before today: the first EN
-;; transfer between two agents where neither is the operator. `inga.metrics`
+;; transfer between two agents where neither is the operator. `engi.metrics`
 ;; reports exactly that (:external-counterparties), so "when do we set a real
 ;; ordering bond?" has a checkable answer instead of a judgement call.
 ;;
@@ -219,7 +219,7 @@
 
   The fallback is therefore a LIVENESS arrangement among an enumerated roster,
   not a security guarantee — appropriate exactly while there is nothing to
-  steal (zero EN transfers between non-operator agents, which `inga.metrics`
+  steal (zero EN transfers between non-operator agents, which `engi.metrics`
   now measures), and to be retired by the same stake-weighted governance vote
   that sets a real `:ordering` floor once that changes."
   [voted bonds witnesses]
@@ -305,7 +305,7 @@
   "Verify one `evidence` map (as produced by `detect-equivocation`) is
   genuine: both votes must carry a signature that `verify-sig-fn`
   (`(fn [vote] boolean)`, injected — this ns has no crypto of its own,
-  same division of labor as `inga.core`'s injected `:hash-fn`) accepts as a
+  same division of labor as `engi.core`'s injected `:hash-fn`) accepts as a
   valid signature BY the claimed witness over that vote's content, and the
   two votes must actually differ in `:inga.vote/block-hash` while sharing
   `:inga.vote/witness`/`:inga.vote/height` (re-checked here, not just
@@ -333,7 +333,7 @@
   report the numbers without crediting anyone (e.g. when the caller
   settles the reward via a different ledger). Does NOT call
   `verify-equivocation-evidence` itself — a caller must verify before
-  slashing; this fn trusts its input, mirroring `inga.core/next-entry`'s
+  slashing; this fn trusts its input, mirroring `engi.core/next-entry`'s
   division of labor (building vs. validating are separate steps)."
   [bonds offending-witness {:keys [burn-fraction whistleblower-fraction credit-to]
                              :or {burn-fraction 0.95 whistleblower-fraction 0.05}}]

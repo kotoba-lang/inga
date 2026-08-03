@@ -109,7 +109,7 @@
   over the same bytes — which is the only reason a browser can check a chain a
   server produced.
 
-  Calls `@noble/hashes` directly rather than `inga.crypto`, whose transitive
+  Calls `@noble/hashes` directly rather than `engi.crypto`, whose transitive
   `kotobase.cid` dependency is not resolvable from here. Same primitive, same
   bytes; the difference is which module wraps it."
   [b]
@@ -149,7 +149,7 @@
   protocol produces.
 
   engi does not know what a transaction is and must not: this stands in for
-  torihiki.state/apply-block on a trading chain and inga.core on a transfer
+  torihiki.state/apply-block on a trading chain and engi.core on a transfer
   ledger, and a consensus layer that imported either would be a consensus
   layer for exactly one application."
   {:init-fn (fn [] {:height -1 :applied 0 :digest "genesis"})

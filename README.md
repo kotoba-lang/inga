@@ -339,8 +339,18 @@ repo. The reason to move it is in engi's own `consensus.cljc` docstring:
 | `inga.sync` | catch-up over segments a stranger hands you |
 | `inga.wire` | total decode; JSON has no keywords, so `:inga.block/height` travels as `"height"` |
 | `inga.net` (+ `net/server`, `net/ws`) | the WebSocket transport, both halves |
-| `inga.attest` (+ `attest/ed25519`) | signatures on certificates — what makes a quorum a quorum rather than a list of names |
+| `inga.attest` (+ `attest/ed25519`) | signatures on certificates — what makes a quorum a quorum rather than a list of names. Ed25519 through **WebCrypto**, so a Worker needs no dependency to verify one |
 | `inga.stake` | permissionless admission by external collateral, stake-weighted quorum, equivocation-only slashing |
+
+`inga.attest` is **not** a duplicate of
+[`kotoba-lang/witness-quorum`](https://github.com/kotoba-lang/witness-quorum),
+though a docstring here claimed a dependency on it for months. They solve
+different problems: witness-quorum cosigns an already-written CID *after* the
+fact (a Certificate-Transparency shape, with a 3-layer validation membrane);
+`inga.attest` signs votes and certificates *before* a commit, inside the
+protocol. They overlap only at "Ed25519", and differ there on purpose —
+witness-quorum's cljs signer takes `@noble/curves` from npm, `inga.attest`
+uses WebCrypto and takes nothing, because this has to run in a Worker.
 
 **Because the namespaces moved, `:engi.block/*` keywords became
 `:inga.block/*`. That is not a wire change** — `inga.wire`'s own docstring

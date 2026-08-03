@@ -1,8 +1,8 @@
 (ns inga.consensus
   "ENGI/EN L1 — chained HotStuff-style BFT consensus over blocks of transfer
   proposals (ADR-2607993000). Pure, no I/O, no crypto, no wall-clock: like
-  `inga.core`, signature verification is injected by the caller rather than
-  performed here (the same seam `inga.core/fold-balance` already uses for
+  `engi.core`, signature verification is injected by the caller rather than
+  performed here (the same seam `engi.core/fold-balance` already uses for
   its optional `:hash-fn` — this ns takes already-verified votes and a
   caller-supplied `hash-fn`). Runs identically under JVM `clojure -M:test`
   and cljs, and a whole n-witness validator set can be simulated as plain
@@ -15,11 +15,36 @@
   (see `consensus_test.cljc`'s Byzantine-equivocation scenario).
 
   What this ns does NOT own (deliberately, per ADR-2607993000 Decision #1):
-  wire transport (murakumo/overlay's QUIC, reused unchanged), vote/QC
-  signing (kotoba-lang/witness-quorum's signer/attestation, reused
-  unchanged), or ENGI's transfer-proposal semantics (inga.core, unchanged —
-  a block's :inga.block/proposals are just a vector of TransferBody CIDs
-  from that existing schema).")
+  wire transport, vote/QC signing, or what a proposal MEANS — a block's
+  `:inga.block/proposals` is a vector of opaque ids and this namespace never
+  looks inside one.
+
+  ## `engi.*` in these docstrings is another repo
+
+  `engi.core` / `engi.crypto` / `engi.metrics` stayed in `kotoba-lang/engi`
+  when the consensus was extracted. They are named here only as the precedent
+  a seam follows; nothing in this repo requires them.
+
+  ## A correction, because this docstring asserted three dependencies it
+  ## never had
+
+  It used to say transport was \"murakumo/overlay's QUIC, reused unchanged\",
+  signing was \"kotoba-lang/witness-quorum's signer/attestation, reused
+  unchanged\", and proposals were ENGI transfer CIDs from `engi.core`. All
+  three were written while the design was a plan and none was corrected as it
+  was built. In fact transport is `inga.net` over WebSockets, signing is
+  `inga.attest` over WebCrypto, and `engi.core` does not exist in this repo.
+
+  The witness-quorum claim in particular sent a reader looking for a
+  duplication that is not there. `kotoba-lang/witness-quorum` solves a
+  DIFFERENT problem — post-hoc cosigning of an already-written CID, a
+  Certificate-Transparency shape, with a 3-layer validation membrane. This
+  namespace signs votes and certificates BEFORE a commit, inside the protocol.
+  The two overlap only at \"Ed25519\", and even there they differ on purpose:
+  witness-quorum's cljs signer takes an npm dependency (`@noble/curves`),
+  while `inga.attest.ed25519` uses WebCrypto and takes none, because this has
+  to run in a Worker. Merging them would mean adding a dependency to the side
+  that does not need one.")
 
 ;; ── quorum arithmetic ───────────────────────────────────────────────────────
 
@@ -67,7 +92,7 @@
 
 (defn canonical-block
   "Deterministic string serialization of a block, for hashing/signing — same
-  style as `inga.core/canonical-entry` (plain string concatenation, no
+  style as `engi.core/canonical-entry` (plain string concatenation, no
   JSON/EDN printer dependency, byte-identical across JVM and cljs)."
   [{:keys [inga.block/height inga.block/parent-hash inga.block/proposals
            inga.block/proposer inga.block/ts]}]
@@ -81,7 +106,7 @@
 (defn make-block
   "Build a block. `justify` is the QC (see `qc`) certifying this block's
   immediate parent — nil only for the genesis block. `proposals` is a vector
-  of TransferBody CIDs (inga.core/ADR-2607101100's existing proposal shape,
+  of TransferBody CIDs (engi.core/ADR-2607101100's existing proposal shape,
   unchanged here)."
   [{:keys [height parent-hash proposals proposer ts justify]}]
   {:inga.block/height height
@@ -93,7 +118,8 @@
 
 (defn make-vote
   "A witness's vote for a specific block. Unsigned here — signing is
-  `witness-quorum`'s job, reused unchanged (ADR-2607993000 Decision #1); a
+  `inga.attest`'s job (this docstring used to name `witness-quorum`, which
+  this repo has never depended on; see the ns docstring); a
   real caller attaches `:inga.vote/sig` after this and `qc` never inspects
   signatures itself (verification already happened before votes reach this
   ns, same division of labor as `fold-balance`'s injected `:hash-fn`)."

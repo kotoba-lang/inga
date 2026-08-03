@@ -57,7 +57,7 @@
   count by two hundred. A thunk makes that unrepresentable rather than
   documented. `engi` does not know what a transaction is
   and must not — that is `torihiki.state` for a trading chain and
-  `inga.core` for transfers, and a consensus layer that imported either would
+  `engi.core` for transfers, and a consensus layer that imported either would
   be a consensus layer for exactly one application.
 
   Only COMMITTED blocks are applied, and exactly once each, in order. Applying
