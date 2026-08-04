@@ -259,6 +259,9 @@
      :new-views {}
      ;; the heights this replica has voted at — never two votes at one height
      :voted #{}
+     ;; Watermark for the heights a `resume` dropped. -1 means "nothing is
+     ;; implied", which is what a replica starting at genesis should say.
+     :voted-below -1
      :qcs {}
      ;; first accepted vote per [witness height], and the proofs of anyone who
      ;; sent a second one for a different block
@@ -276,9 +279,27 @@
 
 ;; ── the chain ───────────────────────────────────────────────────────────────
 
-(declare adopt-own fold-vote cast-vote propose handle-new-view tip)
+(declare adopt-own fold-vote cast-vote propose handle-new-view tip
+         committed-height)
 
 (defn tip [state] (peek (:chain state)))
+
+(defn voted?
+  "Has this replica already voted at `h`?
+
+  `:voted` holds the heights it voted at in this process. `:voted-below` is
+  the watermark a `resume` leaves behind: every height at or under it counts
+  as voted whether or not the set still names it.
+
+  **The watermark only ever makes this answer MORE often.** That direction is
+  the safe one — refusing to vote costs liveness at a height already decided,
+  and voting twice at one height is equivocation, which is the one thing this
+  system slashes for. A resumed replica cannot legitimately need to vote at or
+  below the tip it resumed on: it voted for the block it adopted at each of
+  those heights, and every proposal it will see from now on is above them."
+  [state h]
+  (or (<= h (:voted-below state -1))
+      (contains? (:voted state) h)))
 
 (defn height [state] (:inga.block/height (tip state)))
 
@@ -297,11 +318,21 @@
       :else (recur (get (:by-hash state) (:inga.block/parent-hash b)) (inc n)))))
 
 (defn- commits
-  "Blocks newly committed by the 3-chain rule, in order."
+  "Blocks newly committed by the 3-chain rule, in order.
+
+  Compared by HEIGHT, not by how many are already recorded. Counting assumed
+  both `:chain` and `:committed` run unbroken from genesis, which stopped
+  being true the moment `resume` started handing a replica a bounded tail:
+  `three-chain-commits` over a short chain returns fewer entries than
+  `(count :committed)`, `drop` returns nothing, and the replica commits
+  nothing ever again while every other number about it looks healthy.
+
+  Height comparison needs no such assumption and is the correct formulation
+  with or without a tail."
   [state]
   (let [all (c/three-chain-commits (:hash-fn state) (:chain state))
-        already (count (:committed state))]
-    (vec (drop already all))))
+        h (committed-height state)]
+    (vec (filter #(> (:inga.block/height %) h) all))))
 
 (defn- absorb-commits
   "Record newly committed blocks and run them through the machine.
@@ -454,7 +485,7 @@
       ;; the same block, recovered from what this replica already recorded. A
       ;; second vote for a DIFFERENT block at this height is still refused,
       ;; which is the property that matters.
-      (contains? (:voted state) h)
+      (voted? state h)
       (let [state (note-proposal (extend-chain state block) block
                                  :already-voted-at-this-height)
             mine (get-in state [:votes (hf block) (:witness state)])]
@@ -666,7 +697,7 @@
   while the rest of the network waited for a proposal that already existed."
   [state b now]
   (let [state (-> state (remember-block b) (extend-chain b))]
-    (if (contains? (:voted state) (:inga.block/height b))
+    (if (voted? state (:inga.block/height b))
       [state []]
       (cast-vote state b now))))
 
@@ -827,7 +858,7 @@
   [state now]
   (let [t (tip state)
         h (:inga.block/height t)]
-    (if (or (zero? h) (contains? (:voted state) h))
+    (if (or (zero? h) (voted? state h))
       [state []]
       (cast-vote state t now))))
 
@@ -1056,6 +1087,90 @@
                       (update :pm pm/on-qc j)))))
           state
           (sort-by :inga.block/height blocks)))
+
+(def ^:const resume-tail
+  "How many blocks a snapshot keeps.
+
+  The 3-chain rule needs three to derive a commit and `ancestor?` walks parent
+  links, so anything under four is a replica that cannot certify its own tip.
+  Eight is that with room, and the number is small on purpose: the reason
+  `resume` exists is that O(chain) is what took the deployment down."
+  8)
+
+(def ^:const snapshot-version 1)
+
+(defn snapshot
+  "The replica as plain data, bounded, for storage.
+
+  ## What it drops, and why that is safe
+
+  `replay` restores `:voted` by folding every block. A bounded snapshot cannot
+  — that is the whole point — so it leaves a WATERMARK instead: `:voted-below`
+  = the tip height. `voted?` then refuses at every height at or under it,
+  which refuses at least as much as the folded set did. Refusing more costs a
+  vote at a height already decided; refusing less is equivocation.
+
+  `:votes`, `:new-views` and `:first-vote` are dropped outright. They are
+  per-view working state, and the one place `:votes` is load-bearing across a
+  restart — re-sending this replica's own vote when a proposal for an
+  already-voted height arrives again — degrades to sending nothing, which is
+  what a replica that has genuinely never seen the block would do anyway.
+  **Dropping `:first-vote` also drops the equivocation evidence this replica
+  had collected about others below the tail**, which is a real loss and is
+  stated rather than hidden: evidence already broadcast is held by peers, and
+  evidence not yet broadcast is gone.
+
+  The injected seams (`:hash-fn`, `:sign-fn`, `:verify-fn`, `:machine`) are
+  not here because they are functions. `resume` takes the same options map
+  `replica` does and puts them back.
+
+  `:machine-state` IS here. A replica that resumed with a fresh machine would
+  agree on the order and disagree on the result, which is the failure that is
+  hardest to see: every block certifies, every root differs."
+  [state]
+  (let [chain (vec (take-last resume-tail (:chain state)))
+        hf (:hash-fn state)
+        kept (into #{} (map hf) chain)]
+    {:inga.snapshot/version snapshot-version
+     :witness (:witness state)
+     :chain chain
+     :by-hash (select-keys (:by-hash state) kept)
+     ;; Only the certificates that name a block we still hold. A qc for a
+     ;; block outside the tail cannot be checked against anything.
+     :qcs (into {} (filter (fn [[bh _]] (contains? kept bh)) (:qcs state)))
+     :pm (:pm state)
+     :voted-below (:inga.block/height (peek chain))
+     :committed (vec (take-last 1 (:committed state)))
+     :machine-state (:machine-state state)
+     :equivocations (vec (:equivocations state))
+     :pending (vec (:pending state))
+     :last-proposed-at (:last-proposed-at state)}))
+
+(defn resume
+  "Rebuild a replica from `opts` (what `replica` takes) and a `snapshot`.
+
+  The inverse of `snapshot`, and deliberately NOT the inverse of `replay`:
+  replay folds a history and this adopts a conclusion. A caller with the whole
+  log and time to spend should still use `replay` — it reconstructs strictly
+  more. `resume` is for the caller that does not have the time, which on a
+  Durable Object is every caller past a few hundred blocks."
+  [opts snapshot]
+  (let [v (:inga.snapshot/version snapshot)]
+    (when-not (= v snapshot-version)
+      (throw (ex-info "inga.replica: unknown snapshot version"
+                      {:found v :expected snapshot-version})))
+    (merge (replica opts)
+           {:chain (vec (:chain snapshot))
+            :by-hash (:by-hash snapshot)
+            :qcs (:qcs snapshot)
+            :pm (:pm snapshot)
+            :voted #{}
+            :voted-below (:voted-below snapshot)
+            :committed (vec (:committed snapshot))
+            :machine-state (:machine-state snapshot)
+            :equivocations (vec (:equivocations snapshot))
+            :pending (vec (:pending snapshot))
+            :last-proposed-at (:last-proposed-at snapshot)})))
 
 (defn submit
   "Queue a proposal (a TransferBody CID) for the next block this replica

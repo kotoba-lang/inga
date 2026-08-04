@@ -91,7 +91,7 @@ This is what makes **ADR-2608039000** (`blockchain / 分散型経路に D1 を�
 ## Verification
 
 ```bash
-clojure -M:test      # 47 tests, 131 assertions
+clojure -M:test      # 277 tests, 1,298 assertions
 clojure -M:lint      # 0 errors, 0 warnings
 clojure -M:parity    # and the same on nbb -- both must print one line
 nbb --classpath "src:$(clojure -Spath | tr ':' '\n' | grep kotobase-storage)" \
@@ -362,7 +362,7 @@ repo. The reason to move it is in engi's own `consensus.cljc` docstring:
 | `inga.consensus` | block / QC shape, `n=3f+1` and `quorum=2f+1`, the chained 3-chain commit rule, round-robin leader rotation |
 | `inga.quorum` | quorum as one predicate, count-based and stake-weighted |
 | `inga.pacemaker` | views, timeouts, timeout certificates, view change |
-| `inga.replica` | the replica itself — adopt, commit, the machine seam, equivocation recording |
+| `inga.replica` | the replica itself — adopt, commit, the machine seam, equivocation recording, **bounded `snapshot`/`resume`** |
 | `inga.sync` | catch-up over segments a stranger hands you |
 | `inga.wire` | total decode; JSON has no keywords, so `:inga.block/height` travels as `"height"` |
 | `inga.net` (+ `net/server`, `net/ws`) | the WebSocket transport, both halves |
@@ -406,6 +406,58 @@ Run before the extraction (from engi) and after (from inga); both pass:
 
 TORIHIKI-ON-INGA: pass — four replicas, one exchange
 ```
+
+## Restarting without folding the whole log — `snapshot` / `resume`
+
+`replay` reconstructs a replica by re-executing every block it ever adopted.
+That is the right thing for VERIFYING a chain and the wrong thing for STARTING
+one: it costs O(chain), and a process that must pay that before it can answer
+anything eventually cannot start at all.
+
+Measured, not hypothetical. On 2026-08-04 a deployed validator running this
+consensus layer spent long enough replaying its log to exceed a Cloudflare
+Durable Object's CPU budget; the platform reset the object, the reset threw
+away the in-memory state, and the next invocation replayed from zero and
+exceeded it again. A crash loop that could not end, because recovery **was**
+the work that killed it.
+
+`snapshot` keeps the last `resume-tail` blocks (8 — the 3-chain rule needs
+three to derive a commit and `ancestor?` walks parent links, so four is the
+floor), the certificates naming them, the pacemaker, the machine state, and
+nothing that grows with the chain.
+
+### The dangerous part is `:voted`
+
+A replica must never vote twice at one height — that is equivocation, the one
+thing this system slashes for, and it is invisible from the inside: nothing in
+the replica's own state looks wrong afterwards. `replay` was reconstructing
+`:voted` by folding the blocks. A bounded snapshot cannot, by definition.
+
+So the set is replaced by a **watermark**: `:voted-below` = the tip height, and
+`voted?` answers true at or under it whether or not the set still names the
+height. The watermark only ever makes that answer MORE often, and that is the
+safe direction — refusing costs a vote at a height already decided; not
+refusing is equivocation. A resumed replica cannot legitimately need to vote at
+or below the tip it resumed on: it voted for the block it adopted at each of
+those heights, and every proposal it sees from now on is above them.
+
+`test/inga/resume_test.cljc` was written before the implementation and asserts
+the property directly — every block the replica holds is offered back to it and
+every vote that leaves is checked against the block it actually adopted.
+
+### Two things this cost
+
+**`commits` had to stop counting.** It compared `(count (:committed state))`
+against `three-chain-commits` over the whole chain, which assumes both run
+unbroken from genesis. Over a tail, the count exceeds the list, `drop` returns
+nothing, and the replica commits nothing ever again while every number about it
+looks healthy. It compares by height now — the correct formulation with or
+without a tail.
+
+**`:first-vote` is dropped**, and with it the equivocation evidence this
+replica had collected about others below the tail. Evidence already broadcast
+is held by peers; evidence not yet broadcast is gone. Stated rather than
+hidden.
 
 ## Not here yet
 
