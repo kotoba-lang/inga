@@ -129,3 +129,22 @@
       (is (= "cid-1" (get h "prev")) "and prev links the chain")
       (is (= 1 (:version (storage/-read-ref refs "main")))
           "the ref version a caller sees is that sequence"))))
+
+;; ── the head store is dumb, and dumb includes wrong (ADR-2608047000) ─────────
+
+(deftest a-genuinely-certified-head-for-another-ref-is-not-this-refs-head
+  ;; `write-head!` is unconditional and `read-head!` is untrusted -- that is
+  ;; the premise, not a weakness. So the pointer answering a read for "main"
+  ;; with "other"'s real head is inside its contract. Nothing here is forged:
+  ;; the record, its certificate and the quorum all agree. The only thing
+  ;; wrong with the head is which question it is answering.
+  (let [{:keys [refs heads]} (store-with)]
+    (storage/-compare-and-set-ref! refs "main" nil "cid-main")
+    (storage/-compare-and-set-ref! refs "other" nil "cid-other")
+    (is (= "cid-main" (:cid (storage/-read-ref refs "main"))))
+    (testing "the host serves `other`'s certified head under `main`"
+      (swap! heads assoc "main" (get @heads "other"))
+      (is (nil? (storage/-read-ref refs "main"))
+          "a certificate proves the witnesses signed THAT record, not that it answers THIS ref")
+      (testing "and `other` still reads, so this rejects substitution and not the head"
+        (is (= "cid-other" (:cid (storage/-read-ref refs "other"))))))))

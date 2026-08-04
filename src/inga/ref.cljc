@@ -53,7 +53,10 @@
             [kotobase.storage.core :as storage]))
 
 (defn- current-head [{:keys [read-head! quorum verify-fn]} ref-name]
-  (head/verify-head (read-head! ref-name) quorum verify-fn))
+  ;; `ref-name` goes to the verifier as well as the reader: `read-head!` is a
+  ;; dumb, untrusted pointer and may answer with another ref's genuinely
+  ;; certified head. See `head/verify-head`.
+  (head/verify-head (read-head! ref-name) ref-name quorum verify-fn))
 
 (defrecord QuorumRefStore [read-head! write-head! propose! verify-fn quorum height-fn]
   storage/IRefStore

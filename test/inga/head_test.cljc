@@ -61,11 +61,28 @@
 (deftest an-unverifiable-head-reads-as-absent
   (testing "an untrusted host is expected to be able to serve rubbish"
     (let [r (record)]
-      (is (nil? (head/verify-head (head-of r (cert-over r ["w1"])) quorum verify-fn)))
-      (is (nil? (head/verify-head {"v" "wrong/version"} quorum verify-fn)))
-      (is (nil? (head/verify-head {} quorum verify-fn)))
-      (is (nil? (head/verify-head nil quorum verify-fn)))
-      (is (some? (head/verify-head (head-of r (cert-over r ["w1" "w2" "w3"])) quorum verify-fn))))))
+      (is (nil? (head/verify-head (head-of r (cert-over r ["w1"])) "main" quorum verify-fn)))
+      (is (nil? (head/verify-head {"v" "wrong/version"} "main" quorum verify-fn)))
+      (is (nil? (head/verify-head {} "main" quorum verify-fn)))
+      (is (nil? (head/verify-head nil "main" quorum verify-fn)))
+      (is (some? (head/verify-head (head-of r (cert-over r ["w1" "w2" "w3"]))
+                                   "main" quorum verify-fn))))))
+
+(deftest another-refs-head-is-not-this-refs-head
+  ;; `a-certificate-for-another-ref-does-not-verify`, above, covers the cert
+  ;; being TRANSPLANTED onto a different record -- and reads like it covers
+  ;; this. It does not. Here nothing is transplanted: the record and its
+  ;; certificate agree perfectly, because they are ref "other"'s real head.
+  ;; The only thing wrong with it is the question it is being used to answer,
+  ;; and until `verify-head` was given the ref name there was nothing in the
+  ;; verifier that could notice. `read-head!` is a dumb untrusted pointer, so
+  ;; serving this under "main" is exactly what it is allowed to do.
+  (let [theirs (record :ref "other" :cid "cid-theirs")
+        genuine (head-of theirs (cert-over theirs ["w1" "w2" "w3"]))]
+    (is (some? (head/verify-head genuine "other" quorum verify-fn))
+        "it really is a valid head -- of the ref it names")
+    (is (nil? (head/verify-head genuine "main" quorum verify-fn))
+        "and it is not the head of any other ref, however well certified")))
 
 (deftest genesis-and-empty-prev-are-not-confusable
   (testing "canonical bytes render nil prev as empty, which is unambiguous
