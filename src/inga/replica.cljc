@@ -1070,10 +1070,26 @@
       ;; vote five times a second would be noise on a transport that is
       ;; already the bottleneck.
       (let [t (tip state)
-            certified? (contains? (:qcs state) ((:hash-fn state) t))]
-        (if (or certified? (zero? (:inga.block/height t)))
+            hf (:hash-fn state)
+            certified? (contains? (:qcs state) (hf t))
+            ;; ONCE per (height, view), not once per tick.
+            ;;
+            ;; Gating only on "the tip is uncertified" looked sufficient and is
+            ;; not: a replica that has fallen BEHIND holds a tip nobody else
+            ;; will ever vote for, so the condition never clears and it
+            ;; re-broadcasts forever. Measured on the deployed devnet within
+            ;; minutes of shipping the gate: w4, three blocks behind, had sent
+            ;; **1,348 votes** for its own tip while receiving 15 messages.
+            ;; The fix for a stall became a sender that drowns the transport it
+            ;; needs in order to stop being stalled.
+            ;;
+            ;; A view change is the only thing that makes re-casting useful
+            ;; again, so that is the clock it runs on.
+            stamp [(:inga.block/height t) (:view (:pm state))]
+            asked? (= stamp (:last-tip-vote state))]
+        (if (or certified? (zero? (:inga.block/height t)) asked?)
           (propose state now)
-          (let [[state' out] (vote-on-tip state now)
+          (let [[state' out] (vote-on-tip (assoc state :last-tip-vote stamp) now)
                 [state'' out'] (propose state' now)]
             [state'' (into (vec out) out')])))))))
 

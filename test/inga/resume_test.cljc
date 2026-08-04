@@ -257,3 +257,27 @@
   (let [s (get (run) :w1)]
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                  (r/resume (opts :w1) (assoc (r/snapshot s) :inga.snapshot/version 999))))))
+
+(deftest a-behind-replica-does-not-broadcast-its-tip-forever
+  ;; The regression the first version of the on-tick gate shipped: a replica
+  ;; that has fallen behind holds a tip nobody else will vote for, so
+  ;; "uncertified" never clears and it re-broadcast on every tick. Deployed,
+  ;; that was 1,348 votes against 15 messages received — the fix for a stall
+  ;; drowning the transport it needed in order to stop being stalled.
+  (let [rs (run)
+        w :w1
+        ;; a replica three blocks behind the others, resumed so it holds no
+        ;; vote for its own tip
+        s (get rs w)
+        full (vec (:chain s))
+        behind (r/replay (r/replica (opts w))
+                         (subvec full 0 (max 1 (- (count full) 3))))
+        ;; many ticks inside one view
+        [_ votes] (reduce (fn [[st acc] t]
+                            (let [[st' out] (r/on-tick st t)]
+                              [st' (into acc (votes-out out))]))
+                          [behind []]
+                          (range 100000 100400 10))]
+    (is (<= (count votes) 2)
+        (str "a behind replica emitted " (count votes)
+             " votes for its own tip inside one view"))))
