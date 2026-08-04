@@ -140,6 +140,80 @@
     (is (= (r/committed-height s) (r/committed-height s'))
         "a resumed replica that forgot what it committed would re-apply blocks")))
 
+(deftest the-chain-advances-after-every-replica-restarts
+  ;; The production stall this test was written for, reproduced.
+  ;;
+  ;; A deploy restarts all four at once. Each comes back holding a tip it
+  ;; adopted, and `voted?` says it voted at that height — because it did, and
+  ;; because `replay` records exactly that. `vote-on-tip` then refuses, nobody
+  ;; certifies the tip, nobody can propose the next height, and the chain sits
+  ;; there forever with `votes-for-tip: 0` on every replica at once.
+  ;;
+  ;; Measured on the deployed devnet at height 282, view 267: `blocked-by: no
+  ;; certificate for the tip`, `sent-types {new-view 29, sync-response 87}` —
+  ;; not one vote.
+  ;;
+  ;; **The height has to move.** `committed-height` moving is not enough and
+  ;; is what the first version of this file asserted: the 3-chain rule keeps
+  ;; committing blocks the replica already held for a while after a restart,
+  ;; so a frozen chain reports progress it is not making.
+  ;; Reproduced the way the node actually restarts: resume from a checkpoint
+  ;; taken EARLIER, then fold the blocks above it with `replay` — which is
+  ;; what `catchUp` does off storage.
+  ;;
+  ;; That distinction is the whole test. A replica resumed from a snapshot
+  ;; taken live keeps the certificate its own vote-folding built for the tip,
+  ;; so the leader can propose on it and nothing looks wrong. A replica that
+  ;; REPLAYS to the tip has no such certificate: `replay` recovers a
+  ;; certificate only from a block's `:justify`, and the certificate for the
+  ;; tip travels in the block AFTER it — which was never produced. So the
+  ;; restarted network holds a tip that nobody has certified and that
+  ;; `vote-on-tip` refuses to vote for.
+  (let [rs (run)
+        before (apply max (map (comp r/height val) rs))
+        rs' (into {}
+                  (for [[w s] rs]
+                    (let [full (vec (:chain s))
+                          cut (max 1 (- (count full) 6))
+                          early (subvec full 0 cut)
+                          tail (subvec full cut)
+                          ;; a checkpoint from further back …
+                          snap (r/snapshot (r/replay (r/replica (opts w)) early))
+                          ;; … then catch up to the tip off "storage"
+                          resumed (r/replay (r/resume (opts w) snap) tail)]
+                      [w resumed])))
+        after-net (reduce (fn [rs t]
+                            (let [{rs2 :rs ob :ob}
+                                  (reduce (fn [acc w]
+                                            (let [[s' out] (r/on-tick (get rs w) t)]
+                                              (-> acc
+                                                  (update :rs assoc w s')
+                                                  (update :ob into (map #(assoc % :from w) out)))))
+                                          {:rs rs :ob []}
+                                          (sort (keys rs)))]
+                              (deliver-all rs2 (vec ob) t 4000)))
+                          rs'
+                          (range 5000 6400 100))
+        after (apply max (map (comp r/height val) after-net))]
+    (is (> after before)
+        (str "the chain froze at " before " after every replica restarted"))))
+
+(deftest a-restarted-replica-only-ever-recasts-for-its-own-tip
+  ;; The safety side of the fix above. Re-casting at a height it already voted
+  ;; at is only safe because the block is the one it holds — the same argument
+  ;; `handle-proposal` already makes. Anything else at that height must still
+  ;; get nothing.
+  (let [rs (run)
+        w :w2
+        s (get rs w)
+        resumed (r/resume (opts w) (r/snapshot s))
+        [_ out] (r/on-tick resumed 9999)
+        tip-hash (hash-fn (r/tip resumed))]
+    (doseq [[vh vhash] (votes-out out)]
+      (is (= vh (r/height resumed)))
+      (is (= vhash tip-hash)
+          "a restarted replica voted for a block that is not its own tip"))))
+
 (deftest a-resumed-replica-still-commits-new-blocks
   ;; The trap in truncating `:chain`: `commits` used to count how many entries
   ;; of `three-chain-commits` were already in `:committed`, and over a

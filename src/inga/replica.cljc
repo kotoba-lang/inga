@@ -854,13 +854,52 @@
   already refused the segment unless every block in it carried a certificate
   for its own parent with a quorum of verifying signatures — a block that
   arrived that way has been agreed by more replicas than this one has heard
-  from directly."
+  from directly.
+
+  ## Having voted at this height is not a reason to stay silent
+
+  `replay` records every height it folds as voted — correctly, because those
+  are blocks this replica adopted and voted for the first time round. But a
+  replica that REPLAYS to its tip holds no certificate for that tip:
+  `replay` recovers a certificate only from a block's `:justify`, and the
+  certificate for the tip travels in the block AFTER it, which does not exist
+  yet. So the tip is uncertified, the leader cannot propose on it, and this
+  function — written for exactly that situation — refused to vote because
+  `voted?` said yes.
+
+  Measured on the deployed devnet: all four replicas at height 282, view 267,
+  `blocked-by: no certificate for the tip`, `votes-for-tip: 0`, and
+  `sent-types {new-view 29, sync-response 87}`. Not one vote, forever.
+
+  Re-casting is safe for the same reason `handle-proposal` already re-casts:
+  `voted?` says we voted at this HEIGHT, and **a replica's chain IS what it
+  voted for**, so a vote for our own tip is the same vote we already cast.
+  This function never votes for anything except `(tip state)`, so nothing
+  else at that height can be voted for by accident."
   [state now]
   (let [t (tip state)
-        h (:inga.block/height t)]
-    (if (or (zero? h) (voted? state h))
-      [state []]
-      (cast-vote state t now))))
+        h (:inga.block/height t)
+        hf (:hash-fn state)
+        mine (get-in state [:votes (hf t) (:witness state)])]
+    (cond
+      (zero? h) [state []]
+
+      ;; Never voted here: the ordinary case.
+      (not (voted? state h)) (cast-vote state t now)
+
+      ;; Voted, and still holding the vote: re-send it rather than re-signing.
+      mine
+      [state [{:to :all :msg (cond-> {:type :vote
+                                      :witness (:witness state)
+                                      :block-hash (hf t)
+                                      :height h
+                                      :view (:inga.vote/view mine 0)}
+                               (:inga.vote/sig mine)
+                               (assoc :sig (:inga.vote/sig mine)))}]]
+
+      ;; Voted, and no longer holding the vote — a restart. Cast it again for
+      ;; the block we hold.
+      :else (cast-vote state t now))))
 
 (defn- handle-sync-response
   "Adopt a segment through `inga.sync`, or refuse it whole, and vote for what
@@ -1017,7 +1056,26 @@
                     sig (assoc :sig sig))
               [state' out] (handle-new-view (assoc state :pm pm') msg now)]
           [state' (into [{:to :all :msg msg}] out)]))
-      (propose state now)))))
+      ;; An uncertified tip is the one state a tick can fix and used not to.
+      ;;
+      ;; `vote-on-tip` was reachable only from `handle-sync-response`, and only
+      ;; when that response ADOPTED something. Once every replica sits on the
+      ;; same tip there is nothing left to adopt, so the one function written
+      ;; to rescue an uncertified tip stopped being called at exactly the
+      ;; moment it was needed — and `propose` cannot help, because proposing
+      ;; requires the certificate that is missing.
+      ;;
+      ;; Gated on the tip being uncertified rather than run every tick: when
+      ;; the chain is healthy this costs one map lookup, and re-broadcasting a
+      ;; vote five times a second would be noise on a transport that is
+      ;; already the bottleneck.
+      (let [t (tip state)
+            certified? (contains? (:qcs state) ((:hash-fn state) t))]
+        (if (or certified? (zero? (:inga.block/height t)))
+          (propose state now)
+          (let [[state' out] (vote-on-tip state now)
+                [state'' out'] (propose state' now)]
+            [state'' (into (vec out) out')])))))))
 
 (defn start
   "The first proposal.
