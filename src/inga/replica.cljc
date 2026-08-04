@@ -829,7 +829,28 @@
   chain — one small message costing the network everything it holds, from a
   peer that has to be neither a witness nor even correct. `inga.sync/request`
   already asks in windows for the replica's own sake; this is the same bound
-  applied where it is a defence rather than a convenience."
+  applied where it is a defence rather than a convenience.
+
+  ## A host that uses `resume` MUST answer this itself
+
+  This serves `(:chain state)` — what the replica holds in MEMORY. `resume`
+  bounds that chain to `resume-tail` blocks, so **a replica booted from a
+  snapshot can serve almost nothing**, and it answers a request for old blocks
+  with an empty segment rather than with an error.
+
+  That combination is silent and it deadlocks a network. Measured on a
+  deployed devnet: a replica reset to genesis sent 49 sync requests, its peers
+  returned 115 sync responses, and it stayed at height 0 — every response was
+  empty, and nothing anywhere said so. **A replica that cannot serve history
+  cannot heal its peers**, and the bounded resume that makes restarts cheap is
+  exactly what takes that away.
+
+  The blocks are not lost; they are in whatever durable store the host wrote
+  them to. But consensus here is a pure library and cannot read it. So a host
+  that calls `resume` has to intercept `:sync-request` before `on-message`
+  sees it and answer from storage — `torihiki-node`'s validator does this in
+  `answerSyncRequests`. A host that keeps the whole chain in memory can leave
+  this alone."
   [state {:keys [from to]}]
   (let [cap (:max-batch sync/default-params)
         blocks (->> (:chain state)
