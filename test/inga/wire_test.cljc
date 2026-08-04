@@ -195,3 +195,20 @@
 (deftest a-signature-that-is-not-a-string-is-refused
   (is (= :bad-shape (second (w/decode {"t" "vote" "witness" "w" "block-hash" "h"
                                        "height" 1 "view" 1 "sig" 42})))))
+
+(deftest a-witness-survives-the-wire
+  (let [m {:type :sync-request :witness "w3" :from 4 :to 9}
+        [d err] (w/decode (w/encode m) w/default-limits)]
+    (is (nil? err))
+    (is (= m d)))
+  ;; the previous version's form, which has to keep decoding
+  (let [[d err] (w/decode (w/encode {:type :sync-request :from 4 :to 9})
+                          w/default-limits)]
+    (is (nil? err))
+    (is (nil? (:witness d))))
+  ;; a witness long enough to be a payload is not one
+  (let [[_ err] (w/decode (w/encode {:type :sync-request
+                                     :witness (apply str (repeat 100000 "x"))
+                                     :from 4 :to 9})
+                          w/default-limits)]
+    (is (some? err) "an unbounded witness was accepted as a destination")))

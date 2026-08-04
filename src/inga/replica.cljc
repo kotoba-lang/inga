@@ -446,6 +446,7 @@
       (nil? parent)
       [(note-proposal state block :no-parent)
        [{:to :all :msg {:type :sync-request
+                              :witness (:id state)
                               :from (inc (height state))
                               :to (:inga.block/height block)}}]]
 
@@ -814,7 +815,8 @@
                   (when-let [r (sync/request (height state)
                                              (:inga.qc/height high-qc)
                                              sync/default-params)]
-                    [{:to :all :msg (assoc r :type :sync-request)}]))]
+                    [{:to :all :msg (assoc r :type :sync-request
+                                             :witness (:id state))}]))]
         (if-let [tc (pm/timeout-certificate (vec msgs) (:quorum state))]
           (let [state (update state :pm pm/on-timeout-certificate tc now (:params state))
                 [state out] (propose state now)]
@@ -838,6 +840,20 @@
   snapshot can serve almost nothing**, and it answers a request for old blocks
   with an empty segment rather than with an error.
 
+  ## The answer is addressed to whoever asked
+
+  Broadcasting it looks harmless — everybody drops what does not attach — but
+  a replica far behind receives mostly ANSWERS TO OTHER REPLICAS' QUESTIONS,
+  each starting at a height it cannot reach, and refuses them one after
+  another. Measured on the devnet: a validator at height 0 was offered a
+  segment beginning at 1276, which was the range a caught-up peer had asked
+  about, and reported `:does-not-attach` — a correct refusal of an answer
+  that was never meant for it. `:witness` is what makes the reply go back.
+
+  A request without a witness still gets a broadcast answer, because both
+  versions of a node run side by side across a deploy and refusing the older
+  form would make the upgrade itself the outage.
+
   That combination is silent and it deadlocks a network. Measured on a
   deployed devnet: a replica reset to genesis sent 49 sync requests, its peers
   returned 115 sync responses, and it stayed at height 0 — every response was
@@ -851,14 +867,15 @@
   sees it and answer from storage — `torihiki-node`'s validator does this in
   `answerSyncRequests`. A host that keeps the whole chain in memory can leave
   this alone."
-  [state {:keys [from to]}]
+  [state {:keys [from to witness]}]
   (let [cap (:max-batch sync/default-params)
         blocks (->> (:chain state)
                     (filter #(<= from (:inga.block/height %) to))
                     (take cap)
                     vec)]
     [state (if (seq blocks)
-             [{:to :all :msg {:type :sync-response :blocks blocks}}]
+             [{:to (or witness :all)
+               :msg {:type :sync-response :blocks blocks}}]
              [])]))
 
 (defn- vote-on-tip
@@ -1110,6 +1127,7 @@
               ask (when-not (= (:view (:pm state')) (:last-sync-ask state))
                     [{:to :all
                       :msg {:type :sync-request
+                            :witness (:id state')
                             :from (inc (height state'))
                             ;; We do not know the target, so ask for a window
                             ;; above us. `handle-sync-request` answers with
