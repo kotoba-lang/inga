@@ -625,8 +625,19 @@
     (let [s (get (net) :w2)
           [s1 _] (r/on-tick s 1000)
           deadline (:deadline (:pm s1))
-          [_ out] (r/on-tick s1 (inc deadline))]
-      (is (= [:new-view] (mapv #(:type (:msg %)) out))))))
+          [_ out] (r/on-tick s1 (inc deadline))
+          types (mapv #(:type (:msg %)) out)]
+      (is (some #{:new-view} types) "a timed-out view has to end")
+      ;; A timeout now also asks for a sync. That is deliberate: a view that
+      ;; produced nothing is the only evidence a replica gets that it might be
+      ;; behind, and until this existed a laggard never asked at all — measured
+      ;; in production as `last-sync-request: null` on all four replicas while
+      ;; one of them sat three blocks back. See `vote-on-tip` and
+      ;; `a-replica-left-behind-asks-for-what-it-is-missing`.
+      ;;
+      ;; Asserted as a SET rather than loosened to "anything goes": the two
+      ;; messages are the contract, and a third appearing should fail here.
+      (is (= #{:new-view :sync-request} (set types))))))
 
 ;; ── surviving a restart ─────────────────────────────────────────────────────
 

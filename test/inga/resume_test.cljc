@@ -281,3 +281,58 @@
     (is (<= (count votes) 2)
         (str "a behind replica emitted " (count votes)
              " votes for its own tip inside one view"))))
+
+;; ── a laggard has to be able to catch up on its own ─────────────────────────
+
+(deftest a-replica-left-behind-asks-for-what-it-is-missing
+  ;; Observed in production: w4 three blocks behind, the other three sitting on
+  ;; a certified tip waiting for w4 to lead the next height, and
+  ;; `last-sync-request: null` on ALL FOUR. Resetting w4 to genesis did not
+  ;; help either — it still never asked.
+  ;;
+  ;; A sync request only left on two paths: a proposal whose parent is unknown,
+  ;; and a new-view carrying a higher high-qc. In a stall nobody proposes, and
+  ;; the replica that is behind receives almost nothing (measured: 8 messages
+  ;; in, against 1,527 out). **Falling behind makes a replica isolated, and
+  ;; being isolated is what keeps it behind.**
+  ;;
+  ;; The one thing a stuck replica always knows is that it is stuck. That has
+  ;; to be enough to make it ask.
+  (let [rs (run)
+        w :w1
+        s (get rs w)
+        full (vec (:chain s))
+        behind (r/replay (r/replica (opts w))
+                         (subvec full 0 (max 1 (- (count full) 4))))
+        ;; nothing arrives — this replica is alone with its own clock
+        [_ out] (reduce (fn [[st acc] t]
+                          (let [[st' o] (r/on-tick st t)]
+                            [st' (into acc o)]))
+                        [behind []]
+                        ;; several view timeouts
+                        (range 100000 160000 2000))
+        reqs (filter #(= :sync-request (:type (:msg %))) out)]
+    (is (seq reqs)
+        "a replica that has timed out repeatedly never asked for a sync")
+    (testing "and it asks for the range above its own tip"
+      (let [r (:msg (first reqs))]
+        (is (= (inc (r/height behind)) (:from r)))))))
+
+(deftest the-laggard-does-not-flood-either
+  ;; The same trap as the tip re-vote: a condition that never clears becomes a
+  ;; sender that never stops. One request per view.
+  (let [rs (run)
+        w :w2
+        s (get rs w)
+        full (vec (:chain s))
+        behind (r/replay (r/replica (opts w))
+                         (subvec full 0 (max 1 (- (count full) 4))))
+        [_ out] (reduce (fn [[st acc] t]
+                          (let [[st' o] (r/on-tick st t)]
+                            [st' (into acc o)]))
+                        [behind []]
+                        ;; many ticks, few views
+                        (range 200000 200400 10))
+        reqs (filter #(= :sync-request (:type (:msg %))) out)]
+    (is (<= (count reqs) 2)
+        (str "a behind replica sent " (count reqs) " sync requests inside one view"))))
