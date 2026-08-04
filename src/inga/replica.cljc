@@ -1054,8 +1054,37 @@
                     (f (att/new-view-payload (:chain-id state) v w hq)))
               msg (cond-> {:type :new-view :witness w :view v :high-qc hq}
                     sig (assoc :sig sig))
-              [state' out] (handle-new-view (assoc state :pm pm') msg now)]
-          [state' (into [{:to :all :msg msg}] out)]))
+              [state' out] (handle-new-view (assoc state :pm pm') msg now)
+              ;; Ask for what we might be missing, because a view that timed
+              ;; out is the only evidence a lonely replica ever gets.
+              ;;
+              ;; A sync request used to leave on two paths only: a proposal
+              ;; whose parent we do not hold, and a new-view carrying a higher
+              ;; high-qc. Neither fires in a stall — nobody proposes, and the
+              ;; replica that is behind receives almost nothing precisely
+              ;; because it is behind. Measured in production: w4 three blocks
+              ;; back, 8 messages in against 1,527 out, and
+              ;; `last-sync-request: null` on all four replicas at once.
+              ;; **Falling behind isolates a replica, and being isolated is
+              ;; what keeps it behind.** Resetting it to genesis did not help;
+              ;; it still never asked.
+              ;;
+              ;; Asking costs one message and is answerable by anyone. A peer
+              ;; that is not ahead simply has nothing to send.
+              ;;
+              ;; Once per view, for the same reason the tip re-vote is: a
+              ;; condition that never clears turns any tick-driven sender into
+              ;; a flood, which is a mistake this file has already made once.
+              ask (when-not (= (:view (:pm state')) (:last-sync-ask state))
+                    [{:to :all
+                      :msg {:type :sync-request
+                            :from (inc (height state'))
+                            ;; We do not know the target, so ask for a window
+                            ;; above us. `handle-sync-request` answers with
+                            ;; what it actually holds.
+                            :to (+ (height state') (:max-batch sync/default-params))}}])
+              state' (cond-> state' ask (assoc :last-sync-ask (:view (:pm state'))))]
+          [state' (into (into [{:to :all :msg msg}] (vec ask)) out)]))
       ;; An uncertified tip is the one state a tick can fix and used not to.
       ;;
       ;; `vote-on-tip` was reachable only from `handle-sync-response`, and only
