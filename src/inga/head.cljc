@@ -100,18 +100,32 @@
             (assoc cert :verified-signers (set (keys good)))))))))
 
 (defn verify-head
-  "A head map from storage, verified, or nil.
+  "A head map from storage, verified as the head OF `ref-name`, or nil.
 
   A head that fails verification is treated as ABSENT rather than as an
   error. That is not leniency: the block plane is content-addressed and safe
   on any host, so the only thing an untrusted or broken ref host can do is
   serve a record that does not verify, and the correct reading of that is
-  `there is no head here` — which a caller already knows how to handle."
-  [head quorum verify-fn]
+  `there is no head here` — which a caller already knows how to handle.
+
+  **`ref-name` is checked, not merely required to be present.** Until
+  2026-08-04 this took no ref name at all: it asserted `\"ref\"` was
+  non-blank and never compared it to the ref actually being read. `\"ref\"`
+  is inside the certified record, so a head for ref A carries a perfectly
+  good certificate — and the dumb `read-head!` this store is built on is
+  explicitly allowed to be an untrusted host. That host could answer a read
+  for ref B with ref A's real head and every replica would agree it verifies:
+  the reader gets A's CID under B, with nothing forged and nothing to detect.
+  Same finding and same fix as `kotobase.storage.signed-head` (superproject
+  ADR-2608047000); the quorum does not change it, because a certificate
+  proves the witnesses signed THAT record, not that the record answers THIS
+  question."
+  [head ref-name quorum verify-fn]
   (when (and (map? head)
              (= head-version (get head "v"))
              (integer? (get head "seq"))
              (not (str/blank? (str (get head "ref"))))
+             (= ref-name (get head "ref"))
              (string? (get head "cid")))
     (let [record (head-record {:ref-name (get head "ref")
                                :seq (get head "seq")
