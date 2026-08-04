@@ -196,7 +196,8 @@
                  "height" (:inga.evidence/height e)
                  "vote-a" (enc-vote (:inga.evidence/vote-a e))
                  "vote-b" (enc-vote (:inga.evidence/vote-b e))})
-    :sync-request {"t" "sync-request" "from" (:from msg) "to" (:to msg)}
+    :sync-request (cond-> {"t" "sync-request" "from" (:from msg) "to" (:to msg)}
+                    (:witness msg) (assoc "w" (:witness msg)))
     :sync-response {"t" "sync-response" "blocks" (mapv enc-block (:blocks msg))}
     (throw (ex-info "inga.wire: cannot encode unknown message type"
                     {:type (:type msg)}))))
@@ -276,9 +277,16 @@
            [nil :bad-shape]))
 
        "sync-request"
+       ;; `w` is optional: a node running the previous version does not send
+       ;; it, and refusing its requests mid-deploy would stop the network for
+       ;; the length of the rollout. Present, it must still be a sane string —
+       ;; it is echoed as a destination, so an unbounded one is a way to make
+       ;; this replica carry somebody else's payload.
        (if (and (nat? (get m "from")) (nat? (get m "to"))
-                (<= (get m "from") (get m "to")))
-         [{:type :sync-request :from (get m "from") :to (get m "to")} nil]
+                (<= (get m "from") (get m "to"))
+                (or (nil? (get m "w")) (str-ok? (get m "w") limits)))
+         [(cond-> {:type :sync-request :from (get m "from") :to (get m "to")}
+            (get m "w") (assoc :witness (get m "w"))) nil]
          [nil :bad-shape])
 
        "sync-response"

@@ -366,3 +366,66 @@
         "the diagnostic named a block other than the one that failed")
     (testing "and the genesis-justified first block is still exempt"
       (is (not= (:inga.block/height (first seg)) (:inga.block/height bad))))))
+
+;; ── the end of the sync chain of defects ────────────────────────────────────
+
+(deftest a-network-with-one-replica-behind-heals-itself
+  ;; The property every earlier sync fix was a step toward, asserted directly.
+  ;;
+  ;; Four defects were found and fixed one at a time, each hidden by the one
+  ;; before it: the laggard never asked (S10); peers could not serve history
+  ;; after a bounded resume (S11); the certificates inside a response were
+  ;; never verified so every segment was refused (S12); and the response was
+  ;; broadcast rather than addressed, so the laggard kept receiving somebody
+  ;; else's range and discarding it (S13).
+  ;;
+  ;; **Each fix looked complete until the next one was measured.** So this
+  ;; test does not check that a request leaves, or that a response arrives, or
+  ;; that a segment validates. It checks the only thing that matters: the
+  ;; replica that was behind is not behind any more.
+  (let [rs (run)
+        w :w4
+        s (get rs w)
+        full (vec (:chain s))
+        target (r/height s)
+        ;; w4 knocked back several blocks, the others untouched
+        behind (r/replay (r/replica (opts w))
+                         (subvec full 0 (max 1 (- (count full) 5))))
+        net' (assoc rs w behind)
+        healed (reduce (fn [rs t]
+                         (let [{rs2 :rs ob :ob}
+                               (reduce (fn [acc x]
+                                         (let [[s' out] (r/on-tick (get rs x) t)]
+                                           (-> acc
+                                               (update :rs assoc x s')
+                                               (update :ob into (map #(assoc % :from x) out)))))
+                                       {:rs rs :ob []}
+                                       (sort (keys rs)))]
+                           (deliver-all rs2 (vec ob) t 8000)))
+                       net'
+                       (range 300000 302000 100))]
+    (is (>= (r/height (get healed w)) target)
+        (str "the replica left behind at " (r/height behind)
+             " never caught up to " target))))
+
+(deftest a-sync-response-goes-to-the-replica-that-asked
+  (let [rs (run)
+        asker :w3
+        s (get rs asker)
+        [_ out] (r/on-message (get rs :w1)
+                              {:type :sync-request :witness asker :from 1 :to 3}
+                              9999)
+        resp (first (filter #(= :sync-response (:type (:msg %))) out))]
+    (is (some? resp) "no response at all")
+    (is (= asker (:to resp))
+        "the response was not addressed to the replica that asked")))
+
+(deftest a-request-without-a-witness-still-gets-an-answer
+  ;; Both node versions run side by side during a deploy, so an old request —
+  ;; one with no `:witness` — has to keep working. Refusing it would make the
+  ;; upgrade itself the outage.
+  (let [rs (run)
+        [_ out] (r/on-message (get rs :w1) {:type :sync-request :from 1 :to 3} 9999)
+        resp (first (filter #(= :sync-response (:type (:msg %))) out))]
+    (is (some? resp))
+    (is (= :all (:to resp)) "an unaddressed request must fall back to broadcast")))
