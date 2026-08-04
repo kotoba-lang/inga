@@ -174,6 +174,25 @@
             :wrong-proposer
             :else (recur b more))))))))
 
+(defn first-uncertified
+  "The first block in `blocks` whose justify does not satisfy `quorum-ok?`,
+  or nil. **Diagnostics only** — `validate-segment` is the decision.
+
+  It exists because the refusal it explains was misread twice. A caller
+  reporting `:below-quorum` naturally reaches for `(first segment)`, and the
+  first block is exactly the one that is EXEMPT (its justify is the genesis
+  certificate), so the report always showed a passing block and pointed the
+  reader at a genesis problem that was not there. Two iterations of this
+  workspace's gap loop went looking for a missing genesis exception that had
+  been in `quorum-ok?` all along.
+
+  A diagnostic that names the wrong block is worse than none: it is a wrong
+  answer with evidence attached."
+  ([quorum blocks] (first-uncertified quorum blocks nil nil))
+  ([quorum blocks chain-id verify-fn]
+   (first (filter #(not (quorum-ok? (:inga.block/justify %) quorum chain-id verify-fn))
+                  blocks))))
+
 (defn adopt
   "Append a validated segment. Returns the new chain vector.
 

@@ -952,11 +952,22 @@
         ;; short. Reading which — and which witness — is the difference
         ;; between a diagnosis and a third guess.
         detail (when (and (= :below-quorum reason) (seq segment))
-                 (let [j (:inga.block/justify (first segment))
+                 ;; The block that ACTUALLY failed, not the first one.
+                 ;;
+                 ;; The first block's justify is the genesis certificate,
+                 ;; which `sync/quorum-ok?` exempts — so reporting it always
+                 ;; showed a passing certificate and sent the reader looking
+                 ;; for a missing genesis exception that was already there.
+                 (let [bad (or (sync/first-uncertified
+                                (:quorum state) segment
+                                (:chain-id state) (:verify-fn state))
+                               (first segment))
+                       j (:inga.block/justify bad)
                        v (:verify-fn state)]
                    {:witnesses (vec (sort (:inga.qc/witnesses j #{})))
                     :sigs (vec (sort (keys (:inga.qc/sigs j))))
                     :views (:inga.qc/views j)
+                    :at-height (:inga.block/height bad)
                     :qc-view (:inga.qc/view j)
                     :qc-height (:inga.qc/height j)
                     :attest-says (att/verify-certificate j (:chain-id state)
