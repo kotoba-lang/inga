@@ -14,7 +14,8 @@
   to be replaced by something that refuses at least as much."
   (:require [clojure.test :refer [deftest is testing]]
             [inga.replica :as r]
-            [inga.consensus :as c]))
+            [inga.consensus :as c]
+            [inga.sync :as sync]))
 
 (def witnesses [:w1 :w2 :w3 :w4])
 
@@ -336,3 +337,32 @@
         reqs (filter #(= :sync-request (:type (:msg %))) out)]
     (is (<= (count reqs) 2)
         (str "a behind replica sent " (count reqs) " sync requests inside one view"))))
+
+(deftest the-below-quorum-diagnostic-names-the-block-that-failed
+  ;; It named `(first segment)` — the one block that is EXEMPT, because its
+  ;; justify is the genesis certificate. So every report showed a passing
+  ;; certificate and pointed at a genesis problem that did not exist. Two
+  ;; iterations of the gap loop were spent on that wrong answer.
+  (let [rs (run)
+        s (get rs :w1)
+        full (vec (:chain s))
+        ;; A real segment starts at height 1 — genesis is what the receiver
+        ;; already holds, not something it is offered. `(take 4 full)` includes
+        ;; genesis, whose justify is nil rather than the genesis CERTIFICATE,
+        ;; so it reports as uncertified and the test measured the fixture.
+        ;;
+        ;; a segment whose SECOND block carries a certificate nobody signed
+        seg (mapv (fn [i b]
+                    (if (= i 1)
+                      (assoc b :inga.block/justify
+                             {:inga.qc/height 7 :inga.qc/view 1
+                              :inga.qc/witnesses #{} :inga.qc/sigs {}})
+                      b))
+                  (range)
+                  (subvec full 1 5))
+        bad (sync/first-uncertified 3 seg)]
+    (is (some? bad) "the planted certificate was not detected")
+    (is (= (:inga.block/height (nth seg 1)) (:inga.block/height bad))
+        "the diagnostic named a block other than the one that failed")
+    (testing "and the genesis-justified first block is still exempt"
+      (is (not= (:inga.block/height (first seg)) (:inga.block/height bad))))))
