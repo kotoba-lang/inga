@@ -86,6 +86,19 @@
 
 (defn- project-now [committed] (ref/project (committed)))
 
+#?(:cljs
+   (defn- project-now-async
+     "`committed` may return the records or a promise of them.
+
+     The first real deployment could not use `async-propose!` at all until
+     this existed: its committed prefix is an HTTP round trip to a replica,
+     so `committed` returns a `js/Promise`, and a loop that folds the promise
+     object sees no records and waits until the deadline on every proposal.
+     A shared loop the first caller has to work around is not shared."
+     [committed]
+     (-> (js/Promise.resolve (committed))
+         (.then (fn [records] (ref/project records))))))
+
 #?(:clj
    (defn sync-propose!
      "A blocking `propose!` for a host whose caller is synchronous.
@@ -124,10 +137,12 @@
          (js/Promise.
           (fn [resolve _reject]
             (letfn [(tick []
-                      (let [projection (project-now committed)
-                            s (step projection record)]
-                        (cond
-                          (not= pending s) (resolve s)
-                          (>= (now-ms) deadline) (resolve (timed-out projection record))
-                          :else (js/setTimeout tick poll-ms))))]
+                      (-> (project-now-async committed)
+                          (.then (fn [projection]
+                                   (let [s (step projection record)]
+                                     (cond
+                                       (not= pending s) (resolve s)
+                                       (>= (now-ms) deadline)
+                                       (resolve (timed-out projection record))
+                                       :else (js/setTimeout tick poll-ms)))))))]
               (tick))))))))
