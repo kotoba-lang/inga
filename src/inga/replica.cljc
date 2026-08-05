@@ -330,8 +330,12 @@
   Height comparison needs no such assumption and is the correct formulation
   with or without a tail."
   [state]
-  (let [all (c/three-chain-commits (:hash-fn state) (:chain state))
-        h (committed-height state)]
+  (let [h (committed-height state)
+        ;; Bounded by the committed height, which is the same set of windows
+        ;; the filter below keeps — and NOT the same amount of hashing. See
+        ;; `three-chain-commits`: unbounded, this was quadratic, and it is
+        ;; what stopped a deployed validator from ever finishing a catch-up.
+        all (c/three-chain-commits (:hash-fn state) (:chain state) h)]
     (vec (filter #(> (:inga.block/height %) h) all))))
 
 (defn- absorb-commits
