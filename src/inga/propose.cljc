@@ -84,7 +84,8 @@
    :timed-out? true
    :current (get (ref/head-of projection (get record "ref")) "cid")})
 
-(defn- project-now [committed] (ref/project (committed)))
+#?(:clj
+   (defn- project-now [committed] (ref/project (committed))))
 
 #?(:cljs
    (defn- project-now-async
