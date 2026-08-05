@@ -146,9 +146,19 @@
   may submit ABOUT ANYONE — it is adversarial input by construction, and
   adversarial input must not be able to stop the chain. Refusals go into the
   table instead of being dropped, so a flood of forged accusations is
-  attributable rather than invisible."
+  attributable rather than invisible.
+
+  **Counted, not listed.** The first version of this appended a map to a
+  vector, and that was wrong for the same reason the throw was: this is
+  ATTACKER-CHOSEN data in state that is folded across the whole chain and
+  hashed into a state root. A proposer could grow it without bound, forever,
+  at the cost of block space alone. `{witness {reason count}}` is bounded by
+  the witness set times the fixed reason set, and answers the question the
+  list was there for — who was accused, how, and how often. `:slashes` keeps
+  its vector because only a SUCCESSFUL slash appends to it, and each one
+  costs the offender their entire bond; the attacker does not choose that."
   [table witness reason]
-  (update table :rejected-slashes (fnil conj []) {:witness witness :reason reason}))
+  (update-in table [:rejected-slashes witness reason] (fnil inc 0)))
 
 (defmethod apply-event :slash
   [table {:keys [witness evidence terms]} {:keys [verify-sig-fn]}]
