@@ -23,6 +23,7 @@
   liveable rather than a defect."
   (:require [clojure.test :refer [deftest is testing]]
             #?(:cljs [clojure.test :refer [async]])
+            [ipld.core :as ipld]
             [inga.fuel :as fuel]
             [inga.state :as state]))
 
@@ -40,9 +41,12 @@
 (def crypt #?(:clj identity :cljs (fn [b] (js/Promise.resolve b))))
 (def uncrypt crypt)
 
-(defn- machine-on [blocks]
-  (state/machine
-   {:decode-block identity            ; a block IS its op list in these tests
+(defn- machine-on
+  ([blocks] (machine-on blocks nil))
+  ([blocks emit-fn]
+   (state/machine
+    {:emit-fn emit-fn
+     :decode-block identity           ; a block IS its op list in these tests
     :put! (fn [cid bytes] (swap! blocks assoc cid bytes))
     :get-fn (fn [cid] (get @blocks cid))
     ;; blind-fn/encrypt-fn are arrangement's required keyed-MAC and AEAD
@@ -51,8 +55,8 @@
     ;; that sharper. arrangement requires them precisely so no caller gets an
     ;; unblinded index by forgetting an argument, which is why they are passed
     ;; explicitly rather than defaulted.
-    :blind-fn blind
-    :encrypt-fn crypt}))
+     :blind-fn blind
+     :encrypt-fn crypt})))
 
 (def ops-a [{:op :assert :s "alice" :p "role" :o "witness"}
             {:op :assert :s "alice" :p "stake" :o 100}
@@ -240,3 +244,186 @@
                (state/machine {:decode-block identity :put! (fn [_ _]) :get-fn identity
                                :blind-fn blind :encrypt-fn crypt
                                :fuel {:budget-fn (constantly 1)}}))))
+
+;; ── two roots (ADR-2608059000) ───────────────────────────────────────────────
+;;
+;; The acceptance criterion the ADR states for this step is that four replicas
+;; reach the same StateRoot CID AND the datom half still answers Datalog from
+;; that CID -- F1's criterion, not regressed by the actor tree being added
+;; beside it. The test that carries the most weight, though, is
+;; `actors-are-covered-by-the-root`: if the actor tree were built but not
+;; committed into the root node, every other test here would still pass.
+
+;; `ipld/link` demands a real CID -- it accepts any string and fails later,
+;; inside the base32 decoder. These are computed rather than typed so the
+;; tests exercise the encoding a caller will actually hit.
+(def code-cid (ipld/cid (ipld/encode {"definition" "transfer/v1"})))
+(def state-cid (ipld/cid (ipld/encode {"balance-sheet" 1})))
+
+(def actor-ops-a
+  [{:op :actor-put :address "alice"
+    :actor {:code code-cid :state state-cid :nonce 1 :balance 100}}
+   {:op :actor-put :address "bob" :actor {:nonce 0 :balance 50}}])
+
+(defn- root-node [blocks cid]
+  (ipld/get-node (fn [c] (get @blocks c)) cid))
+
+(defn- two-root-assertions [blocks root]
+  (let [node (root-node blocks root)]
+    (is (some? node) "the state root is a block in the store")
+    (is (= 1 (get node "schema-version")))
+    (testing "both children are present and are real tag-42 links"
+      (is (some? (ipld/link-cid (get node "actors"))))
+      (is (some? (ipld/link-cid (get node "datoms")))))
+    (testing "and they are siblings -- neither is reachable only through the other"
+      (is (not= (ipld/link-cid (get node "actors"))
+                (ipld/link-cid (get node "datoms")))))))
+
+(deftest the-state-root-has-two-children
+  (let [blocks (store)
+        m (machine-on blocks)
+        root ((:root-fn m) (run m [ops-a actor-ops-a]))]
+    #?(:clj (two-root-assertions blocks root)
+       :cljs (async done
+               (-> (js/Promise.resolve root)
+                   (.then (fn [cid] (two-root-assertions blocks cid) (done))))))))
+
+(deftest actors-are-covered-by-the-root
+  (testing "identical datoms, different actors -- the roots must differ"
+    (let [blocks (store)
+          rs (roots-of [[(machine-on blocks) [ops-a actor-ops-a]]
+                        [(machine-on blocks) [ops-a [{:op :actor-put :address "alice"
+                                                      :actor {:nonce 1 :balance 999}}
+                                                     {:op :actor-put :address "bob"
+                                                      :actor {:nonce 0 :balance 50}}]]]])
+          check (fn [[a b]]
+                  (is (not= a b)
+                      "otherwise the actor tree is built and then thrown away"))]
+      #?(:clj (check rs)
+         :cljs (async done (settle rs (fn [cids] (check cids) (done))))))))
+
+(deftest four-replicas-reach-the-same-two-root-cid
+  (let [blocks (store)
+        rs (roots-of (repeatedly 4 (fn [] [(machine-on blocks) [ops-a actor-ops-a]])))]
+    #?(:clj (same-cid-assertions rs)
+       :cljs (async done (settle rs (fn [cids] (same-cid-assertions cids) (done)))))))
+
+(defn- both-halves-assertions [restored]
+  (testing "the datom half still answers Datalog -- F1 not regressed"
+    (is (= #{["alice"] ["bob"]}
+           (state/query restored {:find '[?s] :where '[[?s "role" "witness"]]}))))
+  (testing "and the actor half came back too"
+    (is (= {:code code-cid :state state-cid :nonce 1 :balance 100}
+           (get (state/actors restored) "alice")))
+    (is (= {:code nil :state nil :nonce 0 :balance 50}
+           (get (state/actors restored) "bob")))))
+
+(deftest a-cold-reader-with-only-the-cid-gets-both-halves
+  (let [blocks (store)
+        m (machine-on blocks)
+        root ((:root-fn m) (run m [ops-a actor-ops-a]))]
+    #?(:clj (both-halves-assertions ((:hydrate-fn m) root uncrypt))
+       :cljs (async done
+               (-> (js/Promise.resolve root)
+                   (.then (fn [cid] ((:hydrate-fn m) cid uncrypt)))
+                   (.then (fn [restored] (both-halves-assertions restored) (done))))))))
+
+(deftest actor-at-reads-one-actor-without-hydrating-the-rest
+  (let [blocks (store)
+        m (machine-on blocks)
+        root ((:root-fn m) (run m [actor-ops-a]))
+        get-fn (fn [c] (get @blocks c))
+        check (fn [cid]
+                (let [actors-cid (ipld/link-cid (get (root-node blocks cid) "actors"))]
+                  (is (= {:code nil :state nil :nonce 0 :balance 50}
+                         (state/actor-at get-fn actors-cid "bob")))
+                  (is (nil? (state/actor-at get-fn actors-cid "nobody")))))]
+    #?(:clj (check root)
+       :cljs (async done (-> (js/Promise.resolve root)
+                             (.then (fn [cid] (check cid) (done))))))))
+
+;; ── emission: the source-to-projection direction ─────────────────────────────
+
+(defn- projection-assertions [restored]
+  (testing "the CURRENT balance is what pos answers, not every balance ever"
+    (is (= #{[90]}
+           (state/query restored {:find '[?v] :where '[["alice" "inga.actor/balance" ?v]]}))
+        "the retraction in default-emit is the load-bearing half"))
+  (testing "and the actor tree agrees with its own projection"
+    (is (= 90 (:balance (get (state/actors restored) "alice"))))))
+
+(deftest default-emit-projects-the-current-state-not-its-history
+  (let [blocks (store)
+        m (machine-on blocks state/default-emit)
+        root ((:root-fn m)
+              (run m [[{:op :actor-put :address "alice" :actor {:nonce 1 :balance 100}}]
+                      [{:op :actor-put :address "alice" :actor {:nonce 2 :balance 90}}]]))]
+    #?(:clj (projection-assertions ((:hydrate-fn m) root uncrypt))
+       :cljs (async done
+               (-> (js/Promise.resolve root)
+                   (.then (fn [cid] ((:hydrate-fn m) cid uncrypt)))
+                   (.then (fn [restored] (projection-assertions restored) (done))))))))
+
+(defn- delete-assertions [restored]
+  (is (nil? (get (state/actors restored) "alice")) "gone from the source")
+  (is (empty? (state/query restored
+                           {:find '[?v] :where '[["alice" "inga.actor/balance" ?v]]}))
+      "and gone from the projection"))
+
+(deftest actor-delete-removes-from-both-roots
+  (let [blocks (store)
+        m (machine-on blocks state/default-emit)
+        root ((:root-fn m)
+              (run m [[{:op :actor-put :address "alice" :actor {:nonce 1 :balance 100}}]
+                      [{:op :actor-delete :address "alice"}]]))]
+    #?(:clj (delete-assertions ((:hydrate-fn m) root uncrypt))
+       :cljs (async done
+               (-> (js/Promise.resolve root)
+                   (.then (fn [cid] ((:hydrate-fn m) cid uncrypt)))
+                   (.then (fn [restored] (delete-assertions restored) (done))))))))
+
+(defn- no-emit-assertions [restored]
+  (is (= 100 (:balance (get (state/actors restored) "alice")))
+      "the source has the actor")
+  (is (empty? (state/query restored
+                           {:find '[?v] :where '[["alice" "inga.actor/balance" ?v]]}))
+      "and the projection does NOT -- documented, not accidental"))
+
+(deftest without-emit-fn-the-two-roots-are-independent
+  (testing "the honest state of ADR-2608059000 step 1: the invariant is opt-in"
+    (let [blocks (store)
+          m (machine-on blocks)                       ; no :emit-fn
+          root ((:root-fn m)
+                (run m [[{:op :actor-put :address "alice" :actor {:nonce 1 :balance 100}}]]))]
+      #?(:clj (no-emit-assertions ((:hydrate-fn m) root uncrypt))
+         :cljs (async done
+                 (-> (js/Promise.resolve root)
+                     (.then (fn [cid] ((:hydrate-fn m) cid uncrypt)))
+                     (.then (fn [restored] (no-emit-assertions restored) (done)))))))))
+
+;; ── refusals ─────────────────────────────────────────────────────────────────
+
+(deftest query-refuses-a-bare-db
+  (testing "passing a db used to be correct; a silent empty result set would be worse"
+    (let [m (machine-on (store))
+          st (run m [ops-a])]
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                   (state/query (:db st) {:find '[?s] :where '[[?s "role" "witness"]]})))
+      (is (= #{["alice"] ["bob"]}
+             (state/query st {:find '[?s] :where '[[?s "role" "witness"]]}))
+          "the state map is what it takes"))))
+
+(deftest an-actor-op-without-an-address-is-refused
+  (let [m (machine-on (store))]
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (run m [[{:op :actor-put :actor {:balance 1}}]])))))
+
+(deftest a-code-that-is-not-a-cid-is-refused
+  (testing "otherwise the failure is an NPE from inside the base32 decoder"
+    (let [m (machine-on (store))]
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                   (run m [[{:op :actor-put :address "alice"
+                             :actor {:code "transfer/v1" :balance 1}}]])))
+      (is (some? (run m [[{:op :actor-put :address "alice"
+                           :actor {:code code-cid :balance 1}}]]))
+          "a real CID goes through"))))
