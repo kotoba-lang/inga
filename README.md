@@ -91,8 +91,8 @@ This is what makes **ADR-2608039000** (`blockchain / 分散型経路に D1 を�
 ## Verification
 
 ```bash
-clojure -M:test      # 277 tests, 1,298 assertions
-clojure -M:lint      # 0 errors, 0 warnings
+clojure -M:test      # 307 tests, 1,413 assertions
+clojure -M:lint      # 0 errors, 9 warnings (all pre-existing, in test/)
 clojure -M:parity    # and the same on nbb -- both must print one line
 nbb --classpath "src:$(clojure -Spath | tr ':' '\n' | grep kotobase-storage)" \
     -e "(require '[inga.parity :as p]) (p/report)"
@@ -103,7 +103,7 @@ runtime kotobase deploys on. `inga.parity` runs `head` / `fuel` / `power` /
 `ref` on both and checks one digest:
 
 ```
-head:70/3/false/false/false fuel:10,/3,3,6/0,0 power:2/1/1/4 ref:true/false,cid-1/true,1/cid-2
+head:70/3/false/false/false fuel:10,/3,3,6/0,0 power:2/1/1/1/4 ref:true/false,cid-1/true,1/cid-2
 ```
 
 `inga.state` is not in the parity digest — `arrangement/commit!` returns a CID
@@ -553,10 +553,45 @@ explicit review.* That decision is the blocker, and it is not an engineering
 one. Until it is made, deployments run `:head-count` and have no economic
 security — which is now something the state says out loud.
 
-Still open, from the same ADR: `:storage` power has no retrieval-sampling implementation; the `.kotoba`
-machine body is blocked on the compiler; bond collateral is not deployed, so
-**slashing is implemented and does not fire**; equivocation evidence is
-recorded and does not propagate.
+Still open, from the same ADR: the `.kotoba` machine body is blocked on the
+compiler, and bond collateral is not deployed, so **slashing is implemented
+and does not fire**.
+
+Two items that used to sit in this list are done and were left stale here:
+`:storage` power has retrieval sampling (`inga.retrieval`, above), and
+equivocation evidence **does** propagate — `replica` broadcasts a proof on
+detection, verifies before recording, and forwards only on first sight, with
+the `BYZANTINE_SPLIT=1` measurements above showing what it buys.
+
+### A slash carries its proof, and the fold checks it
+
+Added 2026-08-05 (superproject ADR-2608055000 G2). `inga.power`'s `:slash`
+used to validate only that the witness had a bond, resting on a comment
+saying evidence was checked *before* the event arrived. Nothing enforced
+that, and the evidence never travelled in the committed event — so no replica
+could have checked it even in principle. Whoever composed the block decided
+who lost their collateral, and every replica applied it deterministically.
+Ordered, reproducible, and still an adjudicator.
+
+Now `:slash` carries `:evidence`, and `apply-events` takes a
+`:verify-sig-fn` that `inga.stake/verify-equivocation-evidence` re-runs over
+it. Four things are refused rather than applied: no evidence, evidence naming
+a different witness, evidence that does not verify, and evidence already
+punished (proofs do not expire, so without the last one a witness that was
+slashed, re-bonded, and behaved since could be confiscated again forever).
+
+Refusals are RECORDED in `:rejected-slashes`, not thrown. A slash is the one
+event anyone may submit about anyone, so throwing would let a single forged
+accusation halt every replica — and dropping it silently would make a flood
+of them invisible. Whether evidence verifies is a function of the committed
+bytes, so refusing is deterministic and does not diverge; that is what
+separates this from the `:default` method, where "unknown" depends on the
+replica's code version and therefore must throw.
+
+Missing `:verify-sig-fn` **does** throw. A replica that cannot check evidence
+must not quietly record refusals while its correctly-configured peers apply
+the same slash for real. Every replica passes the same verifier, exactly as
+they must share `:hash-fn`.
 
 ## License
 
