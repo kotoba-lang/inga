@@ -47,18 +47,19 @@
     write-head!  (fn [ref-name head] -> ignored)      dumb UNCONDITIONAL write
     propose!     (fn [record] -> {:certified? bool :cert c :current cid})
     verify-fn    (fn [bytes sig witness] -> boolean)
+    admitted?    (fn [witness] -> boolean)  — WHO may count; a set works
     quorum       positive int — the threshold this validator set requires
     height-fn    (fn [] -> int-or-nil)  consensus height the proposal rides"
   (:require [inga.head :as head]
             [kotobase.storage.core :as storage]))
 
-(defn- current-head [{:keys [read-head! quorum verify-fn]} ref-name]
+(defn- current-head [{:keys [read-head! quorum verify-fn admitted?]} ref-name]
   ;; `ref-name` goes to the verifier as well as the reader: `read-head!` is a
   ;; dumb, untrusted pointer and may answer with another ref's genuinely
   ;; certified head. See `head/verify-head`.
-  (head/verify-head (read-head! ref-name) ref-name quorum verify-fn))
+  (head/verify-head (read-head! ref-name) ref-name quorum verify-fn admitted?))
 
-(defrecord QuorumRefStore [read-head! write-head! propose! verify-fn quorum height-fn]
+(defrecord QuorumRefStore [read-head! write-head! propose! verify-fn admitted? quorum height-fn]
   storage/IRefStore
   (-read-ref [this ref-name]
     (when-let [h (current-head this ref-name)]
@@ -118,16 +119,22 @@
 (defn ref-store
   "Build the ref store. Every seam is required except `height-fn`, which is
   nil for deployments whose quorum has no chain height to report."
-  [{:keys [read-head! write-head! propose! verify-fn quorum height-fn]}]
+  [{:keys [read-head! write-head! propose! verify-fn admitted? quorum height-fn]}]
   (doseq [[k v] {:read-head! read-head! :write-head! write-head!
-                 :propose! propose! :verify-fn verify-fn}]
+                 :propose! propose! :verify-fn verify-fn
+                 ;; `admitted?` is a seam like the others and REQUIRED like
+                 ;; the others. A store built without it would verify
+                 ;; signatures from keys nobody admitted -- see
+                 ;; `inga.head/verify-cert`. A set satisfies `ifn?`, so the
+                 ;; ordinary `#{"w1" "w2" "w3"}` passes straight through.
+                 :admitted? admitted?}]
     (when-not (ifn? v)
       (throw (ex-info "inga.ref: missing or non-callable seam"
                       {:type :inga.ref/invalid-seam :seam k}))))
   (when-not (pos-int? quorum)
     (throw (ex-info "inga.ref: quorum must be a positive integer"
                     {:type :inga.ref/invalid-quorum :quorum quorum})))
-  (->QuorumRefStore read-head! write-head! propose! verify-fn quorum height-fn))
+  (->QuorumRefStore read-head! write-head! propose! verify-fn admitted? quorum height-fn))
 
 ;; ── the ref as a projection of the committed log ────────────────────────────
 ;;

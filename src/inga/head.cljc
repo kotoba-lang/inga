@@ -88,10 +88,36 @@
   threshold this validator set requires; the caller derives it (for a BFT set
   that is `engi.consensus/quorum-size`, 2f+1 of n=3f+1) rather than this ns
   guessing, because a wrong threshold is a silent safety failure and the
-  arithmetic belongs with the set that knows n."
-  [record cert quorum verify-fn]
-  (when (and (map? cert) (pos-int? quorum))
-    (let [signers (distinct-signers (:sigs cert))]
+  arithmetic belongs with the set that knows n.
+
+  `admitted?` is `(fn [witness] -> boolean)` — **who is even allowed to
+  count.** A set works directly, because a set is that function.
+
+  ## Why this is required and not optional
+
+  This namespace's own docstring says a certificate proves that quorum
+  distinct witnesses *of a known validator set* signed the record. Until
+  2026-08-05 nothing here knew the set. Membership was left to `verify-fn`,
+  and the obvious `verify-fn` — verify this Ed25519 signature — does not
+  check it: an attacker generates `quorum` keypairs, signs the record with
+  every one of them, and the certificate verifies. Nothing is forged. The
+  claim in the docstring was simply not enforced anywhere.
+
+  The asymmetry was the tell: `quorum` was an argument and checked here,
+  while membership was a property no argument carried. Superproject
+  ADR-2608047000 follow-up 4 named it and deliberately did not add it as an
+  optional parameter with a permissive default, because a security check that
+  defaults to off is a security check most callers do not have. It is
+  required, exactly like `quorum`, and every caller updates.
+
+  ## Order matters
+
+  Membership is applied BEFORE the threshold, so signatures from outside the
+  set cannot count toward it — the same discipline as checking `ref-name`
+  before the signature: a check that runs after the decision is not a check."
+  [record cert quorum verify-fn admitted?]
+  (when (and (map? cert) (pos-int? quorum) (ifn? admitted?))
+    (let [signers (into {} (filter (comp admitted? key)) (distinct-signers (:sigs cert)))]
       (when (>= (count signers) quorum)
         (let [bytes (canonical-bytes record)
               good (into {} (filter (fn [[witness sig]] (verify-fn bytes sig witness)))
@@ -119,8 +145,11 @@
   Same finding and same fix as `kotobase.storage.signed-head` (superproject
   ADR-2608047000); the quorum does not change it, because a certificate
   proves the witnesses signed THAT record, not that the record answers THIS
-  question."
-  [head ref-name quorum verify-fn]
+  question.
+
+  `admitted?` is passed straight to `verify-cert` — see there for why a
+  certificate that does not know its validator set proves nothing."
+  [head ref-name quorum verify-fn admitted?]
   (when (and (map? head)
              (= head-version (get head "v"))
              (integer? (get head "seq"))
@@ -132,7 +161,7 @@
                                :cid (get head "cid")
                                :prev (get head "prev")
                                :height (get head "height")})]
-      (when (verify-cert record (get head "cert") quorum verify-fn)
+      (when (verify-cert record (get head "cert") quorum verify-fn admitted?)
         head))))
 
 (defn next-head

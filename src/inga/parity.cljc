@@ -74,19 +74,28 @@
 (defn- sig-for [w r] (str w "|" (head/canonical-bytes r)))
 (defn- verify-fn [bytes sig w] (= sig (str w "|" bytes)))
 
+(def ^:private validators #{"w1" "w2" "w3"})
+
 (defn- head-digest []
   (let [r (head/head-record {:ref-name "main" :seq 3 :cid "cid-3" :prev "cid-2" :height 9})
         ok (head/verify-cert r {:sigs (mapv (fn [w] {:witness w :sig (sig-for w r)})
-                                            ["w1" "w2" "w3"])} 3 verify-fn)
+                                            ["w1" "w2" "w3"])} 3 verify-fn validators)
         dup (head/verify-cert r {:sigs (repeat 5 {:witness "w1" :sig (sig-for "w1" r)})}
-                              3 verify-fn)
+                              3 verify-fn validators)
         cross (head/verify-cert r {:sigs (mapv (fn [w]
                                                  {:witness w
                                                   :sig (sig-for w (assoc r "ref" "other"))})
-                                               ["w1" "w2" "w3"])} 3 verify-fn)]
+                                               ["w1" "w2" "w3"])} 3 verify-fn validators)
+        ;; Three keys nobody admitted, each signing correctly. Before
+        ;; 2026-08-05 this VERIFIED -- minting keys is free, so the
+        ;; certificate was self-certifying. In the parity digest because a
+        ;; security property that holds on one runtime and not the other is
+        ;; not a security property.
+        outsider (head/verify-cert r {:sigs (mapv (fn [w] {:witness w :sig (sig-for w r)})
+                                                  ["x1" "x2" "x3"])} 3 verify-fn validators)]
     (str "head:" (count (head/canonical-bytes r))
          "/" (count (:verified-signers ok))
-         "/" (some? dup) "/" (some? cross))))
+         "/" (some? dup) "/" (some? cross) "/" (some? outsider))))
 
 (defn- fuel-digest []
   (let [ops (mapv (fn [i] {:op :assert :i i}) (range 10))
@@ -123,7 +132,8 @@
                        {:certified? false :current (get winner "cid")})))
         refs (iref/ref-store {:read-head! (fn [n] (get @heads n))
                               :write-head! (fn [n h] (swap! heads assoc n h))
-                              :propose! propose! :verify-fn verify-fn :quorum 3})
+                              :propose! propose! :verify-fn verify-fn
+                              :admitted? validators :quorum 3})
         a (storage/-compare-and-set-ref! refs "main" nil "cid-1")
         b (storage/-compare-and-set-ref! refs "main" nil "cid-other")
         c (storage/-compare-and-set-ref! refs "main" "cid-1" "cid-2")]

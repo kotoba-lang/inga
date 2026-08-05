@@ -59,6 +59,7 @@
              :write-head! (fn [ref-name h] (swap! heads assoc ref-name h))
              :propose! (reference-quorum decided)
              :verify-fn verify-fn
+             :admitted? (set witnesses)
              :quorum quorum})}))
 
 ;; ── the acceptance test ──────────────────────────────────────────────────────
@@ -114,6 +115,7 @@
                  :write-head! (fn [_ _] nil)          ; a store that silently drops
                  :propose! (reference-quorum decided)
                  :verify-fn verify-fn
+                 :admitted? (set witnesses)
                  :quorum quorum})
           result (storage/-compare-and-set-ref! refs "main" nil "cid-1")]
       (is (false? (:published? result))

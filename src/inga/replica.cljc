@@ -770,7 +770,8 @@
                          ;; carries no claim about anything that was decided.
                          (zero? (:inga.qc/height high-qc -1))
                          (nil? (att/verify-certificate high-qc (:chain-id state)
-                                                       (:quorum state) verify)))))]
+                                                       (:quorum state) verify
+                                                       (wire/admits (:witnesses state)))))))]
     (if-not ok?
       [state []]
       (let [state (update-in state [:new-views view] (fnil assoc {}) witness
@@ -992,7 +993,8 @@
                     :qc-view (:inga.qc/view j)
                     :qc-height (:inga.qc/height j)
                     :attest-says (att/verify-certificate j (:chain-id state)
-                                                         (:quorum state) v)
+                                                         (:quorum state) v
+                                                         (wire/admits (:witnesses state)))
                     :per-witness
                     (when v
                       (into {}

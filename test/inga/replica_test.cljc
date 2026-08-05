@@ -14,6 +14,7 @@
             [inga.head :as head]
             [inga.quorum :as q]
             [inga.ref :as iref]
+            [inga.wire :as wire]
             [inga.state :as state]
             [inga.state-test :as state-test]
             [clojure.string]
@@ -291,7 +292,10 @@
           cert (get-in s' [:qcs bh])]
       (is (some? cert))
       (is (att/signed? cert))
-      (is (nil? (att/verify-certificate cert chain (c/quorum-size 4) fake-verify))
+      ;; Through `wire/admits`: this suite holds witnesses as keywords and the
+      ;; certificate names them as they crossed the wire.
+      (is (nil? (att/verify-certificate cert chain (c/quorum-size 4) fake-verify
+                                        (wire/admits witnesses)))
           "and it verifies"))))
 
 ;; ── the view-change path ────────────────────────────────────────────────────

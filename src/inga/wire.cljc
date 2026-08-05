@@ -77,6 +77,25 @@
   [x]
   (if (keyword? x) (subs (str x) 1) (str x)))
 
+(defn admits
+  "A membership predicate over `witnesses`, compared through `wire-id`.
+
+  `inga.head/verify-cert` and `inga.attest/verify-certificate` both take an
+  `admitted?` predicate, and the obvious `(set witnesses)` is wrong here for
+  exactly the reason `wire-id` exists: the configured set is held as `:w1`
+  while a certificate that crossed the wire names `\"w1\"`, so a raw set
+  rejects every genuine witness. `inga.sync` already recorded that failure
+  once — a proposer check compared with `str`, refused EVERY segment
+  including the honest ones, and looked like a successful fix because the
+  thing being measured was a forgery no longer getting in.
+
+  A check that rejects everything and a check that rejects the right thing
+  are indistinguishable from the attacker's side. Normalising here is what
+  keeps them apart."
+  [witnesses]
+  (let [ids (into #{} (map wire-id) witnesses)]
+    (fn [w] (contains? ids (wire-id w)))))
+
 (defn- enc-qc [qc]
   (when qc
     (cond-> {"block-hash" (:inga.qc/block-hash qc)

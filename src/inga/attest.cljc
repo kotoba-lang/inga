@@ -40,7 +40,12 @@
             [inga.quorum :as q]))
 
 (def reasons
-  #{:unsigned :missing-signature :bad-signature :below-quorum})
+  ;; `:not-admitted` — a witness the certificate names is not in the validator
+  ;; set (or no set was supplied). Distinct from `:bad-signature` on purpose:
+  ;; the signature is typically PERFECTLY GOOD and that is the whole problem,
+  ;; so an operator reading a log needs to see "a key nobody admitted signed
+  ;; this", not "someone's crypto is broken".
+  #{:unsigned :not-admitted :missing-signature :bad-signature :below-quorum})
 
 (defn vote-payload
   "The canonical string a witness signs. Field-per-line with names, so two
@@ -127,8 +132,26 @@
   certificate naming five witnesses and signing for one passes both halves.
 
   `verify-fn` receives `[witness payload sig]`. Injected, as everywhere else —
-  a browser that cannot re-verify a certificate is not a verifier."
-  [qc chain-id quorum verify-fn]
+  a browser that cannot re-verify a certificate is not a verifier.
+
+  `admitted?` is `(fn [witness] -> boolean)`, REQUIRED. A set works directly.
+
+  ## Why a certificate cannot be trusted to name its own witnesses
+
+  `witnesses` comes out of the certificate. Before 2026-08-05 nothing
+  compared it to the validator set, so a certificate that named an
+  attacker's own keys, and carried good signatures from every one of them,
+  satisfied every branch below: no missing signature, no bad signature, and
+  `quorum` met. Minting keys is free. The certificate was self-certifying.
+
+  `:not-admitted` is checked FIRST, before signatures and before quorum, so
+  keys from outside the set cannot dilute or inflate either count. Same
+  ordering rule as `inga.head/verify-cert` and for the same reason.
+
+  A stake-weighted quorum predicate narrows this by accident — an unknown
+  witness carries no bond — but head-count does not, and the defence must
+  not depend on which quorum profile a deployment picked."
+  [qc chain-id quorum verify-fn admitted?]
   (let [witnesses (:inga.qc/witnesses qc #{})
         sigs (:inga.qc/sigs qc)
         views (:inga.qc/views qc)
@@ -137,6 +160,8 @@
         view-of #(get views % (:inga.qc/view qc 0))]
     (cond
       (empty? sigs) :unsigned
+      (not (ifn? admitted?)) :not-admitted
+      (some (complement admitted?) witnesses) :not-admitted
       :else
       (let [verified (filter (fn [w]
                                (when-let [sig (get sigs w)]
