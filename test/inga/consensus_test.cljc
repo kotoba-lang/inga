@@ -162,3 +162,32 @@
       (is (= 5 (count (set (map :inga.vote/witness votes-a)))))
       (is (some? (consensus/qc votes-a 7)) "A reaches quorum of 5 (3 honest + both equivocators)")
       (is (nil? (consensus/qc votes-b 7)) "B has only 4 distinct witnesses -- below quorum of 5, no conflicting QC"))))
+
+;; ── the bounded scan must not change the answer ──────────────────────────────
+
+(deftest bounding-the-scan-does-not-change-what-commits
+  ;; The whole claim of the `above-height` arity is that it drops exactly the
+  ;; windows the caller discards anyway. Asserted against the unbounded form
+  ;; at every height, rather than at one convenient one.
+  (let [chain (linked-chain 4 40)
+        full (consensus/three-chain-commits hash-fn chain)]
+    (doseq [h (range -1 41)]
+      (is (= (vec (filter #(> (:inga.block/height %) h) full))
+             (vec (filter #(> (:inga.block/height %) h)
+                          (consensus/three-chain-commits hash-fn chain h))))
+          (str "bounded scan disagreed above height " h)))))
+
+(deftest the-bounded-scan-hashes-a-bounded-amount
+  ;; The reason for the change, measured rather than asserted in prose. An
+  ;; unbounded scan of a 400-block chain hashes it whole; bounded to the last
+  ;; few heights it must not.
+  (let [chain (linked-chain 4 400)
+        n (atom 0)
+        counting (fn [b] (swap! n inc) (hash-fn b))]
+    (consensus/three-chain-commits counting chain)
+    (let [unbounded @n]
+      (reset! n 0)
+      (consensus/three-chain-commits counting chain 396)
+      (is (< @n (/ unbounded 20))
+          (str "bounded scan hashed " @n " of " unbounded
+               " — the bound is not bounding anything")))))

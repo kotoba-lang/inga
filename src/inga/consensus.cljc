@@ -179,6 +179,18 @@
           (= parent-hash (:inga.qc/block-hash justify))
           (= (:inga.block/height parent) (:inga.qc/height justify))))))
 
+(defn- first-index-above
+  "Index of the first block in `chain` above `h`. Binary search, because the
+  point of the caller is to stop touching the whole chain."
+  [chain h]
+  (loop [lo 0 hi (count chain)]
+    (if (< lo hi)
+      (let [mid (quot (+ lo hi) 2)]
+        (if (<= (:inga.block/height (nth chain mid)) h)
+          (recur (inc mid) hi)
+          (recur lo mid)))
+      lo)))
+
 (defn three-chain-commits
   "Given `chain` (a vector of blocks in strictly increasing height order,
   each carrying a :inga.block/justify QC for its immediate predecessor —
@@ -188,16 +200,35 @@
   extensions. This is what turns a bare sequence of proposed blocks into
   finalized ones — everything before the last-committed block is authoritative
   for `en.core/finalized-balance` (ADR-2607993000 Decision #4); anything at
-  or after the tip is still tentative."
-  [hash-fn chain]
-  (let [n (count chain)]
-    (vec
-     (keep (fn [i]
-             (let [b0 (nth chain i) b1 (nth chain (inc i)) b2 (nth chain (+ i 2))]
-               (when (and (direct-extends? hash-fn b0 b1)
-                          (direct-extends? hash-fn b1 b2))
-                 b0)))
-           (range (max 0 (- n 2)))))))
+  or after the tip is still tentative.
+
+  ## `above-height` is not an optimisation of the answer, it is one of the work
+
+  A caller that already committed up to height `h` throws away every window
+  below it. Computing them anyway costs two `hash-fn` calls each, and
+  `hash-fn` is the expensive thing here — so a replica adopting its Nth block
+  hashes the whole chain again, and adopting N blocks costs N² hashes.
+
+  That is not a slow path, it is a wall. Measured on a deployed validator
+  catching up over 1067 blocks: it never finished. The Durable Object hit its
+  CPU limit mid-replay, was reset, started the replay from the beginning, and
+  did that indefinitely — and because that validator was the leader, the chain
+  it was trying to rejoin could not advance without it. **The replica that
+  most needs to catch up is the one least able to.**
+
+  Passing the committed height skips exactly the windows the caller would
+  discard, so the answer is unchanged by construction; only the work is."
+  ([hash-fn chain] (three-chain-commits hash-fn chain nil))
+  ([hash-fn chain above-height]
+   (let [n (count chain)
+         start (if (nil? above-height) 0 (first-index-above chain above-height))]
+     (vec
+      (keep (fn [i]
+              (let [b0 (nth chain i) b1 (nth chain (inc i)) b2 (nth chain (+ i 2))]
+                (when (and (direct-extends? hash-fn b0 b1)
+                           (direct-extends? hash-fn b1 b2))
+                  b0)))
+            (range start (max 0 (- n 2))))))))
 
 ;; ── leader rotation ──────────────────────────────────────────────────────────
 
