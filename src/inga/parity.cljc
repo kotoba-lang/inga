@@ -108,16 +108,40 @@
          "/" (:applied b) "," (:exhausted-at b) "," (:spent b)
          "/" (:applied c) "," (:exhausted-at c))))
 
+(defn- equivocation-fixture
+  "A well-formed double-vote by `w` at `h` — same shape
+  `inga.stake/detect-equivocation` emits. Signatures are strings and the
+  verifier below is injected, so this stays a pure cross-runtime fixture with
+  no crypto in it."
+  [w h]
+  (letfn [(vote [block-hash]
+            {:inga.vote/witness w :inga.vote/height h
+             :inga.vote/block-hash block-hash
+             :inga.vote/sig (str "sig:" w ":" h ":" block-hash)})]
+    {:inga.evidence/witness w :inga.evidence/height h
+     :inga.evidence/vote-a (vote "block-a")
+     :inga.evidence/vote-b (vote "block-b")}))
+
 (defn- power-digest []
+  ;; Both a slash that APPLIES and one that is REFUSED, so the digest covers
+  ;; the verification path added in ADR-2608055000 G2 rather than only the
+  ;; happy one: a runtime that skipped the check would agree on the first and
+  ;; disagree on the second.
   (let [t (power/apply-events
            power/empty-table 4
            [{:event :bond :witness "w1" :amount 200 :roles [:ordering]}
             {:event :bond :witness "w2" :amount 100 :roles [:ordering :storage]}
             {:event :bond :witness "w3" :amount 100 :roles [:recompute]}
-            {:event :slash :witness "w1" :terms {}}])]
+            {:event :slash :witness "w1" :terms {}
+             :evidence (equivocation-fixture "w1" 3)}
+            ;; evidence naming someone else: refused, nobody loses anything
+            {:event :slash :witness "w2" :terms {}
+             :evidence (equivocation-fixture "w3" 3)}]
+           {:verify-sig-fn (constantly true)})]
     (str "power:" (count (power/bonds t))
          "/" (count (stake/eligible-witnesses (power/bonds t) 1 :ordering))
          "/" (count (stake/eligible-witnesses (power/bonds t) 1 :storage))
+         "/" (count (:rejected-slashes t))
          "/" (:height t))))
 
 (defn- ref-digest []

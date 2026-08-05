@@ -1,12 +1,38 @@
 (ns inga.power-test
   "F3: the power table is a function of the committed prefix, so peers cannot
-  hold different validator sets while agreeing on blocks."
+  hold different validator sets while agreeing on blocks.
+
+  The `:slash` tests also pin superproject ADR-2608055000 G2 (invariant I4, no
+  adjudicator exists): a confiscation must carry the proof that justifies it
+  and this fold must check it, so no proposer can decide who loses collateral."
   (:require [clojure.test :refer [deftest is testing]]
             [inga.power :as power]
             [inga.stake :as stake]))
 
-(defn- table-after [events]
-  (power/apply-events power/empty-table 1 events))
+;; ── evidence fixtures ───────────────────────────────────────────────────────
+;;
+;; Shaped exactly as `inga.stake/detect-equivocation` emits and
+;; `verify-equivocation-evidence` consumes. The signature is a string and the
+;; verifier is injected, the same division of labour every other seam here uses
+;; -- this namespace has no crypto and must not grow any.
+
+(defn- vote [w h block-hash]
+  {:inga.vote/witness w :inga.vote/height h :inga.vote/block-hash block-hash
+   :inga.vote/sig (str "sig:" w ":" h ":" block-hash)})
+
+(defn- equivocation
+  "A genuine double-vote by `w` at `h`: same witness, same height, two blocks."
+  [w h]
+  {:inga.evidence/witness w :inga.evidence/height h
+   :inga.evidence/vote-a (vote w h "block-a")
+   :inga.evidence/vote-b (vote w h "block-b")})
+
+(def ^:private accepts-every-signature (constantly true))
+(def ^:private accepts-no-signature (constantly false))
+
+(defn- table-after
+  ([events] (table-after events {:verify-sig-fn accepts-every-signature}))
+  ([events opts] (power/apply-events power/empty-table 1 events opts)))
 
 (def bonded
   (table-after [{:event :bond :witness "w1" :amount 100 :roles [:ordering]}
@@ -14,12 +40,14 @@
                 {:event :bond :witness "w3" :amount 100 :roles [:ordering]}
                 {:event :bond :witness "w4" :amount 100 :roles [:ordering :storage]}]))
 
+(defn- slash-of [w h] {:event :slash :witness w :terms {} :evidence (equivocation w h)})
+
 (deftest the-table-is-a-function-of-the-committed-prefix
   (testing "the same events in the same order give the same table -- which is
             what moving it into committed state buys"
     (let [evs [{:event :bond :witness "w1" :amount 50 :roles [:ordering]}
                {:event :bond :witness "w2" :amount 25 :roles [:storage]}
-               {:event :slash :witness "w1" :terms {}}]]
+               (slash-of "w1" 7)]]
       (is (= (table-after evs) (table-after evs)))
       (is (= 25 (get-in (table-after evs) [:bonds "w2" :amount])))
       (is (nil? (get-in (table-after evs) [:bonds "w1"]))
@@ -72,16 +100,119 @@
                         [:bonds "w4"]))))))
 
 (deftest slashing-lands-at-a-decided-height
-  (let [t (power/apply-events bonded 5 [{:event :slash :witness "w1" :terms {}}])]
+  (let [t (power/apply-events bonded 5 [(slash-of "w1" 7)]
+                              {:verify-sig-fn accepts-every-signature})]
     (is (nil? (get-in t [:bonds "w1"])) "the whole record goes -- no ghost entry")
     (is (= 5 (:height t)) "and the table records which prefix it is a function of")
     (is (nil? (get (power/bonds t) "w1"))
         "so stake never counts it again from this height on")
     (testing "the magnitude is committed too, not just the fact"
-      (is (= [{:witness "w1" :burned 95.0 :rewarded 0}] (:slashes t))))))
+      (is (= [{:witness "w1" :burned 95.0 :rewarded 0 :for-height 7}] (:slashes t))))
+    (testing "and WHICH double-vote was punished, which is what makes it auditable"
+      (is (= #{["w1" 7]} (:punished t))))))
 
 (deftest events-for-an-unbonded-witness-are-refused
-  (doseq [e [{:event :slash :witness "ghost" :terms {}}
-             {:event :set-roles :witness "ghost" :roles [:ordering]}
-             {:event :unbond-request :witness "ghost" :available-at 1}]]
-    (is (thrown? #?(:clj Exception :cljs js/Error) (table-after [e])) (pr-str e))))
+  (testing ":set-roles/:unbond-request throw -- a witness submits those about
+            ITSELF, so a ghost is a bug in the submitter, not adversarial input"
+    (doseq [e [{:event :set-roles :witness "ghost" :roles [:ordering]}
+               {:event :unbond-request :witness "ghost" :available-at 1}]]
+      (is (thrown? #?(:clj Exception :cljs js/Error) (table-after [e])) (pr-str e))))
+  (testing ":slash does NOT throw -- anyone may submit one about anyone, so a
+            throw would let one forged accusation halt every replica"
+    (let [t (table-after [(slash-of "ghost" 3)])]
+      (is (= [{:witness "ghost" :reason :not-bonded}] (:rejected-slashes t)))
+      (is (empty? (:slashes t))))))
+
+;; ── G2: a slash must carry its proof, and this fold must check it ───────────
+
+(deftest a-slash-without-a-verifier-throws
+  (testing "a replica that cannot check evidence must never apply a slash, and
+            must not quietly record refusals while its correctly-configured
+            peers apply the same slash for real -- that is divergence, so this
+            is the one slash failure that is loud"
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (power/apply-events bonded 2 [(slash-of "w1" 7)])))
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (power/apply-events bonded 2 [(slash-of "w1" 7)] {})))))
+
+(deftest a-slash-carrying-no-evidence-is-refused
+  (testing "THE regression this exists for. Until 2026-08-05 this event -- no
+            proof of anything -- confiscated w1's entire bond on every replica,
+            because the method validated only that w1 had a bond."
+    (let [t (power/apply-events bonded 2 [{:event :slash :witness "w1" :terms {}}]
+                                {:verify-sig-fn accepts-every-signature})]
+      (is (= [{:witness "w1" :reason :no-evidence}] (:rejected-slashes t)))
+      (is (= 100 (get-in t [:bonds "w1" :amount])) "the bond is untouched")
+      (is (empty? (:slashes t))))))
+
+(deftest evidence-about-someone-else-is-refused
+  (testing "otherwise a real proof about w2 launders into a confiscation from w1"
+    (let [t (power/apply-events bonded 2
+                                [{:event :slash :witness "w1" :terms {}
+                                  :evidence (equivocation "w2" 7)}]
+                                {:verify-sig-fn accepts-every-signature})]
+      (is (= [{:witness "w1" :reason :evidence-names-another-witness}] (:rejected-slashes t)))
+      (is (= 100 (get-in t [:bonds "w1" :amount])))
+      (is (= 100 (get-in t [:bonds "w2" :amount])) "and w2 is not slashed either"))))
+
+(deftest evidence-that-does-not-verify-is-refused
+  (testing "unverifiable evidence is how one node frames another -- the
+            signatures are re-checked here, not trusted from the proposer"
+    (let [t (power/apply-events bonded 2 [(slash-of "w1" 7)]
+                                {:verify-sig-fn accepts-no-signature})]
+      (is (= [{:witness "w1" :reason :evidence-did-not-verify}] (:rejected-slashes t)))
+      (is (= 100 (get-in t [:bonds "w1" :amount]))))))
+
+(deftest two-votes-for-the-same-block-are-not-equivocation
+  (testing "structurally malformed evidence is caught by stake's own re-check,
+            not by trusting that the proposer ran detection honestly"
+    (let [not-a-double-vote {:inga.evidence/witness "w1" :inga.evidence/height 7
+                             :inga.evidence/vote-a (vote "w1" 7 "block-a")
+                             :inga.evidence/vote-b (vote "w1" 7 "block-a")}
+          t (power/apply-events bonded 2
+                                [{:event :slash :witness "w1" :terms {}
+                                  :evidence not-a-double-vote}]
+                                {:verify-sig-fn accepts-every-signature})]
+      (is (= [{:witness "w1" :reason :evidence-did-not-verify}] (:rejected-slashes t)))
+      (is (= 100 (get-in t [:bonds "w1" :amount]))))))
+
+(deftest the-same-proof-cannot-punish-twice
+  (testing "evidence for height H stays valid forever. Without :punished, a
+            witness that was slashed, re-bonded, and has behaved since could be
+            confiscated again for the same past act by anyone holding the old
+            proof -- indefinitely."
+    (let [opts {:verify-sig-fn accepts-every-signature}
+          slashed (power/apply-events bonded 2 [(slash-of "w1" 7)] opts)
+          rebonded (power/apply-events slashed 3
+                                       [{:event :bond :witness "w1" :amount 100 :roles [:ordering]}]
+                                       opts)
+          again (power/apply-events rebonded 4 [(slash-of "w1" 7)] opts)]
+      (is (= 100 (get-in again [:bonds "w1" :amount]))
+          "the re-bonded collateral survives the replayed proof")
+      (is (= [{:witness "w1" :reason :already-punished}] (:rejected-slashes again)))
+      (is (= 1 (count (:slashes again))) "still exactly one slash on record"))
+    (testing "but a DIFFERENT height is a different offence and does apply"
+      (let [opts {:verify-sig-fn accepts-every-signature}
+            slashed (power/apply-events bonded 2 [(slash-of "w1" 7)] opts)
+            rebonded (power/apply-events slashed 3
+                                         [{:event :bond :witness "w1" :amount 100 :roles [:ordering]}]
+                                         opts)
+            again (power/apply-events rebonded 4 [(slash-of "w1" 9)] opts)]
+        (is (nil? (get-in again [:bonds "w1"])))
+        (is (= #{["w1" 7] ["w1" 9]} (:punished again)))))))
+
+(deftest a-flood-of-forged-accusations-is-attributable-not-fatal
+  (testing "adversarial input must not stop the chain, and must not vanish
+            either -- every refusal is committed state"
+    (let [t (power/apply-events bonded 2
+                                [{:event :slash :witness "w1" :terms {}}
+                                 {:event :slash :witness "w2" :terms {}
+                                  :evidence (equivocation "w3" 4)}
+                                 (slash-of "w3" 5)]
+                                {:verify-sig-fn accepts-no-signature})]
+      (is (= [{:witness "w1" :reason :no-evidence}
+              {:witness "w2" :reason :evidence-names-another-witness}
+              {:witness "w3" :reason :evidence-did-not-verify}]
+             (:rejected-slashes t)))
+      (is (= 400 (stake/total-stake (power/bonds t) ["w1" "w2" "w3" "w4"]))
+          "nobody lost anything"))))
