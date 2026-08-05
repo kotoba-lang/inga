@@ -75,16 +75,40 @@
   keeps the boundary crisp: `spent` never exceeds `budget`, so `budget` is a
   real ceiling rather than an approximate one. The alternative — run, then
   charge, then notice — lets one expensive op overrun by an unbounded amount,
-  and 'unbounded' is not a quantity two replicas can agree on."
-  [{:keys [state ops budget cost-fn step]}]
+  and 'unbounded' is not a quantity two replicas can agree on.
+
+  ## `:expansion-cost-fn` — for an op that is not the whole of what it does
+
+  Optional `(fn [state op] -> nat-int)`, added to `cost-fn`'s answer for the
+  same op. It exists because an op can expand into more work whose size is a
+  function of the state it lands on: `inga.state`'s actor ops emit datoms, and
+  how many depends on whether that address already held a record.
+
+  It is charged as ONE unit with the op rather than as separate ops on their
+  own. That is the whole point — the expansion has to be atomic with what
+  produced it, and metering them separately would let a block run out of fuel
+  BETWEEN an actor mutation and its projection, which is a state no replica
+  should be able to commit.
+
+  `cost-fn` keeps its one-argument shape. A cost that depends on state is the
+  exception, and making every caller take an argument it ignores would spread
+  that exception over all of them."
+  [{:keys [state ops budget cost-fn step expansion-cost-fn]}]
   (when-not (and (nat-int? budget) (ifn? cost-fn) (ifn? step))
     (throw (ex-info "inga.fuel/apply-metered: budget must be a non-negative int, cost-fn and step callable"
+                    {:type :inga.fuel/invalid-args})))
+  (when (and (some? expansion-cost-fn) (not (ifn? expansion-cost-fn)))
+    (throw (ex-info "inga.fuel/apply-metered: :expansion-cost-fn is not callable"
                     {:type :inga.fuel/invalid-args})))
   (loop [s state, remaining (seq ops), spent 0, applied 0, idx 0]
     (if-not remaining
       {:state s :spent spent :applied applied :exhausted-at nil :dropped 0}
       (let [op (first remaining)
-            cost (cost-fn op)]
+            expansion (if expansion-cost-fn (expansion-cost-fn s op) 0)
+            _ (when-not (nat-int? expansion)
+                (throw (ex-info "inga.fuel: expansion-cost-fn returned a non-integer cost"
+                                {:type :inga.fuel/invalid-cost :op op :cost expansion})))
+            cost (+ (cost-fn op) expansion)]
         (when-not (nat-int? cost)
           (throw (ex-info "inga.fuel: cost-fn returned a non-integer cost"
                           {:type :inga.fuel/invalid-cost :op op :cost cost})))

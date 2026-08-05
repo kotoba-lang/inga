@@ -427,3 +427,96 @@
       (is (some? (run m [[{:op :actor-put :address "alice"
                            :actor {:code code-cid :balance 1}}]]))
           "a real CID goes through"))))
+
+;; ── ADR-2608059000 step 3: emission is metered, and must be deterministic ────
+;;
+;; The ADR's judgment for this step is not "the projection works" — it is that
+;; a projection which stops being a pure function of the transition makes
+;; replicas SPLIT, demonstrably. That property is what turns "emission must be
+;; deterministic" from a sentence in a docstring into something the network
+;; enforces, so it is the thing under test here.
+
+(defn- replica-local-emit
+  "An emission that reads something OUTSIDE the transition — the replica's own
+  identity. This is what a non-deterministic projection looks like in
+  practice: not a random number, but a value that is stable per process and
+  different between processes, which is exactly the kind that survives review."
+  [replica-id]
+  (fn [o prev next]
+    (conj (state/default-emit o prev next)
+          {:op :assert :s (:address o) :p "observed-by" :o replica-id})))
+
+(def actor-block
+  [{:op :actor-put :address "alice" :actor {:nonce 1 :balance 100}}
+   {:op :actor-put :address "bob" :actor {:nonce 0 :balance 50}}])
+
+(deftest deterministic-emission-keeps-replicas-together
+  (let [blocks (store)
+        rs (roots-of (repeatedly 4 (fn [] [(machine-on blocks state/default-emit)
+                                           [actor-block]])))]
+    #?(:clj (same-cid-assertions rs)
+       :cljs (async done (settle rs (fn [cids] (same-cid-assertions cids) (done)))))))
+
+(defn- split-assertions [blocks [a b]]
+  (is (not= a b)
+      "a projection that is not a function of the transition splits the network")
+  (let [na (root-node blocks a)
+        nb (root-node blocks b)]
+    (testing "and the split is in the PROJECTION, not in the source"
+      (is (= (ipld/link-cid (get na "actors")) (ipld/link-cid (get nb "actors")))
+          "both replicas hold the identical actor tree")
+      (is (not= (ipld/link-cid (get na "datoms")) (ipld/link-cid (get nb "datoms")))
+          "and disagree only about what it projects to"))))
+
+(deftest emission-is-deterministic-or-replicas-split
+  (let [blocks (store)
+        rs (roots-of [[(machine-on blocks (replica-local-emit "replica-a")) [actor-block]]
+                      [(machine-on blocks (replica-local-emit "replica-b")) [actor-block]]])]
+    #?(:clj (split-assertions blocks rs)
+       :cljs (async done (settle rs (fn [cids] (split-assertions blocks cids) (done)))))))
+
+;; ── emission is charged for ─────────────────────────────────────────────────
+
+(defn- emitting-machine [blocks budget emit-fn]
+  (state/machine
+   {:decode-block :ops
+    :emit-fn emit-fn
+    :put! (fn [cid bytes] (swap! blocks assoc cid bytes))
+    :get-fn (fn [cid] (get @blocks cid))
+    :blind-fn blind
+    :encrypt-fn crypt
+    :fuel {:budget-fn (constantly budget)
+           :cost-fn (fuel/fixed-cost 1)
+           :height-fn :height}}))
+
+(def one-actor-block
+  {:height 1 :ops [{:op :actor-put :address "alice" :actor {:nonce 1 :balance 100}}]})
+
+(deftest emission-is-charged-not-free
+  (testing "the same op costs more when it projects than when it does not"
+    (let [blocks (store)
+          without ((:apply-fn (emitting-machine blocks 100 nil)) 
+                   ((:init-fn (emitting-machine blocks 100 nil))) one-actor-block)
+          with ((:apply-fn (emitting-machine blocks 100 state/default-emit))
+                ((:init-fn (emitting-machine blocks 100 state/default-emit))) one-actor-block)
+          spent-of (fn [st] (state/query st {:find '[?v]
+                                             :where '[["inga.fuel/block/1" "inga.fuel/spent" ?v]]}))]
+      ;; default-emit on a fresh address asserts nonce + balance and retracts
+      ;; nothing, so the op costs 1 for itself plus 2 for what it projects.
+      (is (= #{[1]} (spent-of without)))
+      (is (= #{[3]} (spent-of with))))))
+
+(deftest an-op-whose-emission-does-not-fit-is-not-applied-at-all
+  (testing "the atomicity the expansion charge exists for"
+    (let [blocks (store)
+          m (emitting-machine blocks 2 state/default-emit)   ; op=1 + emission=2 > 2
+          st ((:apply-fn m) ((:init-fn m)) one-actor-block)]
+      (is (empty? (state/actors st))
+          "the actor was NOT written — a block cannot run out of fuel between a
+           mutation and its projection and commit the half of it that fit")
+      (is (empty? (state/query st {:find '[?v]
+                                   :where '[["alice" "inga.actor/balance" ?v]]}))
+          "and nothing was projected either")
+      (is (= #{[0]} (state/query st {:find '[?v]
+                                     :where '[["inga.fuel/block/1" "inga.fuel/exhausted-at" ?v]]}))
+          "it is recorded as exhausted at op 0, which is what a peer checks"))))
