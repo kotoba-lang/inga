@@ -103,7 +103,7 @@ runtime kotobase deploys on. `inga.parity` runs `head` / `fuel` / `power` /
 `ref` on both and checks one digest:
 
 ```
-head:70/3/false/false fuel:10,/3,3,6/0,0 power:100/1/1/true/4 ref:true/false,cid-1/true,1/cid-2
+head:70/3/false/false/false fuel:10,/3,3,6/0,0 power:2/1/1/4 ref:true/false,cid-1/true,1/cid-2
 ```
 
 `inga.state` is not in the parity digest — `arrangement/commit!` returns a CID

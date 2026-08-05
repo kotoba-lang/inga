@@ -20,6 +20,7 @@
             [inga.consensus :as c]
             [inga.ref :as iref]
             [inga.replica :as r]
+            [inga.wire :as wire]
             [kotobase.storage.contract :as contract]
             [kotobase.storage.core :as storage]
             [kotobase.storage.memory :as memory]))
@@ -128,6 +129,13 @@
       ;; head plane requires and defers the crypto, which is the same division
       ;; of labour inga.attest draws for votes.
       :verify-fn (fn [_ sig _] (some? sig))
+      ;; Through `wire/admits`, not `(set witnesses)`: this suite holds its
+      ;; witnesses as keywords (:w1) while a certificate that came off the
+      ;; wire names them as strings ("w1"). A raw set rejects every genuine
+      ;; witness -- and a check that rejects everything looks exactly like a
+      ;; check that works, when what you are measuring is a forgery no longer
+      ;; getting in. `inga.sync` already paid for that lesson once.
+      :admitted? (wire/admits witnesses)
       :quorum 1
       :propose! (fn [record]
                   (let [id (id-of record)]

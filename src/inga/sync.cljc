@@ -92,7 +92,7 @@
   The verifier is optional so a replica replaying its own already-checked
   history does not re-verify it — the same distinction `apply-block` draws in
   torihiki between live application and replay."
-  [qc quorum chain-id verify-fn]
+  [qc quorum chain-id verify-fn admitted?]
   (or
    ;; Genesis is exempt. The first block of any history is justified by the
    ;; certificate `inga.replica/start` fabricates so that a first proposal has
@@ -112,7 +112,7 @@
    (zero? (:inga.qc/height qc -1))
    (and (q/met? quorum (:inga.qc/witnesses qc #{}))
         (or (nil? verify-fn)
-            (nil? (att/verify-certificate qc chain-id quorum verify-fn))))))
+            (nil? (att/verify-certificate qc chain-id quorum verify-fn admitted?))))))
 
 (defn validate-segment
   "nil when `blocks` (ascending, contiguous) may be adopted on top of the block
@@ -123,8 +123,28 @@
   block be checked with exactly the same `direct-extends?` every other step
   uses, instead of a special case that could differ."
   ([hash-fn quorum anchor blocks params]
-   (validate-segment hash-fn quorum anchor blocks params nil nil))
-  ([hash-fn quorum anchor blocks {:keys [max-batch witnesses] :as _params} chain-id verify-fn]
+   (validate-segment hash-fn quorum anchor blocks params nil nil nil))
+  ([hash-fn quorum anchor blocks params chain-id verify-fn]
+   ;; `:witnesses` is the ORDERED validator list — `inga.consensus/leader-for`
+   ;; indexes into it, so it is a vector and its order is the leader rotation.
+   ;; Membership is a different question asked of the same list, so it is
+   ;; derived here rather than by overloading the key: passing a SET as
+   ;; `:witnesses` to get membership silently breaks leader election, and
+   ;; passing the ordered list to get leader election silently turns on the
+   ;; proposer check. Two questions, one source, asked separately.
+   (validate-segment hash-fn quorum anchor blocks params chain-id verify-fn
+                     (when-let [ws (:witnesses params)] (wire/admits ws))))
+  ([hash-fn quorum anchor blocks {:keys [max-batch witnesses] :as _params}
+    chain-id verify-fn admitted?]
+  ;; Verifying without a validator set is not a weaker check, it is no check:
+  ;; a certificate names its own witnesses, so signatures that all verify
+  ;; prove only that SOMEBODY holds SOME keys. This throws rather than
+  ;; rejecting because it is a caller-construction error, not untrusted input
+  ;; -- the same line `inga.ref/ref-store` draws when a seam is missing.
+  ;; Superproject ADR-2608047000 follow-up 4.
+  (when (and verify-fn (nil? admitted?))
+    (throw (ex-info "inga.sync: a verifier needs the validator set to verify against"
+                    {:type :inga.sync/no-validator-set})))
   (cond
     (empty? blocks) :empty-segment
     (> (count blocks) max-batch) :too-large
@@ -141,7 +161,7 @@
         (loop [prev anchor [b & more] blocks]
           (cond
             (nil? b) nil
-            (not (quorum-ok? (:inga.block/justify b) quorum chain-id verify-fn))
+            (not (quorum-ok? (:inga.block/justify b) quorum chain-id verify-fn admitted?))
             :below-quorum
             (not (c/direct-extends? hash-fn prev b)) :uncertified
 
@@ -188,9 +208,14 @@
 
   A diagnostic that names the wrong block is worse than none: it is a wrong
   answer with evidence attached."
-  ([quorum blocks] (first-uncertified quorum blocks nil nil))
-  ([quorum blocks chain-id verify-fn]
-   (first (filter #(not (quorum-ok? (:inga.block/justify %) quorum chain-id verify-fn))
+  ([quorum blocks] (first-uncertified quorum blocks nil nil nil))
+  ([quorum blocks chain-id verify-fn] (first-uncertified quorum blocks chain-id verify-fn nil))
+  ([quorum blocks chain-id verify-fn admitted?]
+   ;; A diagnostic must answer the SAME question the decision asked, so it
+   ;; takes the validator set too. Without it this reported every block as
+   ;; uncertified the moment membership started being checked -- naming the
+   ;; wrong block again, which is the exact failure this docstring is about.
+   (first (filter #(not (quorum-ok? (:inga.block/justify %) quorum chain-id verify-fn admitted?))
                   blocks))))
 
 (defn adopt

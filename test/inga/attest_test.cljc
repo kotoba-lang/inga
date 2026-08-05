@@ -8,6 +8,9 @@
 
 (def ^:const chain "engi-test")
 (def quorum 3)
+;; The validator set. `verify-certificate` needs it because a certificate
+;; naming its own witnesses proves nothing (superproject ADR-2608047000 #4).
+(def validators #{"w1" "w2" "w3" "w4"})
 
 ;; A stand-in signer: enough to prove that what is signed is what is checked,
 ;; without importing a curve into a namespace whose point is portability.
@@ -36,40 +39,40 @@
 ;; ── verification ────────────────────────────────────────────────────────────
 
 (deftest an-honest-certificate-verifies
-  (is (nil? (att/verify-certificate (signed-qc) chain quorum verify)))
+  (is (nil? (att/verify-certificate (signed-qc) chain quorum verify validators)))
   (is (att/signed? (signed-qc))))
 
 (deftest a-certificate-of-names-only-is-refused
   (testing "the hole this closes: inga.consensus/qc records no signatures"
     (let [bare (c/qc (mapv #(c/make-vote % "BH" 4) ["w1" "w2" "w3"]) 4 7)]
       (is (not (att/signed? bare)))
-      (is (= :unsigned (att/verify-certificate bare chain quorum verify))))))
+      (is (= :unsigned (att/verify-certificate bare chain quorum verify validators))))))
 
 (deftest a-forged-signature-is-refused
   (let [q (assoc-in (signed-qc) [:inga.qc/sigs "w2"] "sig<w2|whatever>")]
-    (is (= :bad-signature (att/verify-certificate q chain quorum verify)))))
+    (is (= :bad-signature (att/verify-certificate q chain quorum verify validators)))))
 
 (deftest a-witness-named-without-a-signature-is-refused
   (testing "otherwise a peer names five and signs for one"
     (let [q (update (signed-qc) :inga.qc/sigs dissoc "w3")]
-      (is (= :missing-signature (att/verify-certificate q chain quorum verify))))))
+      (is (= :missing-signature (att/verify-certificate q chain quorum verify validators))))))
 
 (deftest a-signature-from-another-chain-is-refused
   (is (= :bad-signature
-         (att/verify-certificate (signed-qc) "different-chain" quorum verify))))
+         (att/verify-certificate (signed-qc) "different-chain" quorum verify validators))))
 
 (deftest a-signature-for-another-view-is-refused
   (testing "a certificate must not borrow a signature from a different view"
     (let [q (assoc (signed-qc) :inga.qc/view 99)]
-      (is (= :bad-signature (att/verify-certificate q chain quorum verify))))))
+      (is (= :bad-signature (att/verify-certificate q chain quorum verify validators))))))
 
 (deftest below-quorum-is-refused-even-when-every-signature-is-good
   (testing "a certificate cannot be built below quorum in the first place —
             inga.consensus/qc returns nil — so the case that matters is a
             valid certificate held to a LARGER quorum than it was formed for"
     (let [q (signed-qc)]                       ; three good signatures
-      (is (nil? (att/verify-certificate q chain 3 verify)))
-      (is (= :below-quorum (att/verify-certificate q chain 4 verify))
+      (is (nil? (att/verify-certificate q chain 3 verify validators)))
+      (is (= :below-quorum (att/verify-certificate q chain 4 verify validators))
           "three verified signatures do not satisfy a quorum of four")))
   (testing "and off the 3f+1 grid the threshold is no longer 2f+1: it used to be
             [1 3 3 3 5] for n=[1 4 5 6 7], and at n=6 a quorum of 3 out of 6 can
@@ -111,12 +114,12 @@
     (let [ch (chain-of 4 false)]
       (is (= :below-quorum
              (sync/validate-segment h quorum (nth ch 1) (subvec ch 2)
-                                    sync/default-params chain verify))))))
+                                    sync/default-params chain verify validators))))))
 
 (deftest sync-with-a-verifier-accepts-a-signed-chain
   (let [ch (chain-of 4 true)]
     (is (nil? (sync/validate-segment h quorum (nth ch 1) (subvec ch 2)
-                                     sync/default-params chain verify)))))
+                                     sync/default-params chain verify validators)))))
 
 (deftest sync-with-a-verifier-refuses-a-forged-signature
   (let [ch (chain-of 4 true)
@@ -124,7 +127,7 @@
                          assoc-in [:inga.block/justify :inga.qc/sigs "w2"] "nope")]
     (is (= :below-quorum
            (sync/validate-segment h quorum (nth ch 1) tampered
-                                  sync/default-params chain verify)))))
+                                  sync/default-params chain verify validators)))))
 
 ;; ── the wire carries them ───────────────────────────────────────────────────
 
@@ -132,7 +135,7 @@
   (let [q (signed-qc)
         [m _] (w/decode (w/encode {:type :new-view :witness :w1 :view 9 :high-qc q}))]
     (is (att/signed? (:high-qc m)))
-    (is (nil? (att/verify-certificate (:high-qc m) chain quorum verify))
+    (is (nil? (att/verify-certificate (:high-qc m) chain quorum verify validators))
         "a certificate that cannot be checked after transport is not a certificate")))
 
 (deftest an-encoded-certificate-is-still-json-safe
@@ -159,7 +162,7 @@
     (testing "and resolving them reproduces a working verifier"
       (let [resolved (into {} (map (fn [[w p s]] [[w p s] (verify w p s)])) checks)]
         (is (nil? (att/verify-certificate q chain quorum
-                                          (att/lookup-verifier resolved))))))))
+                                          (att/lookup-verifier resolved) validators)))))))
 
 (deftest an-unasked-signature-verifies-as-false
   (testing "a verifier that treats 'not asked' as acceptance turns a gap in the
@@ -169,7 +172,7 @@
                                  (take 2 (att/pending-checks q chain)))]
       (is (= :bad-signature
              (att/verify-certificate q chain quorum
-                                     (att/lookup-verifier partial-resolved)))))))
+                                     (att/lookup-verifier partial-resolved) validators))))))
 
 (deftest pending-checks-skips-witnesses-with-no-signature
   (let [q (update (signed-qc) :inga.qc/sigs dissoc "w3")]
@@ -178,7 +181,7 @@
            (att/verify-certificate q chain quorum
                                    (att/lookup-verifier
                                     (into {} (map (fn [[w p s]] [[w p s] true]))
-                                          (att/pending-checks q chain))))))))
+                                          (att/pending-checks q chain))) validators)))))
 
 ;; ── votes for one block are cast in different views ─────────────────────────
 
@@ -197,7 +200,7 @@
                       [["w1" 16] ["w2" 16] ["w3" 51]])
           q (att/certify (c/qc votes 4 51) votes)]
       (is (= {"w1" 16 "w2" 16 "w3" 51} (:inga.qc/views q)))
-      (is (nil? (att/verify-certificate q chain 3 verify))
+      (is (nil? (att/verify-certificate q chain 3 verify validators))
           "every signature verifies, each against the view it was made in"))))
 
 (deftest per-witness-views-survive-the-wire
@@ -212,4 +215,4 @@
           [m _] (w/decode (w/encode {:type :new-view :witness "w1" :view 51
                                      :high-qc q}))]
       (is (= {"w1" 16 "w2" 16 "w3" 51} (:inga.qc/views (:high-qc m))))
-      (is (nil? (att/verify-certificate (:high-qc m) chain 3 verify))))))
+      (is (nil? (att/verify-certificate (:high-qc m) chain 3 verify validators))))))

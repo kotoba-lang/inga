@@ -65,6 +65,6 @@
 
 (defn verify-certificate!
   "A promise of `inga.attest/verify-certificate`'s answer: nil, or a reason."
-  [qc chain-id quorum]
+  [qc chain-id quorum admitted?]
   (-> (resolve-certificate qc chain-id)
-      (.then (fn [vf] (att/verify-certificate qc chain-id quorum vf)))))
+      (.then (fn [vf] (att/verify-certificate qc chain-id quorum vf admitted?)))))

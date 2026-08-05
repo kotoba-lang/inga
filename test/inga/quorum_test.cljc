@@ -71,13 +71,22 @@
         qc (att/certify {:inga.qc/block-hash "BH" :inga.qc/height 4
                          :inga.qc/view 7 :inga.qc/witnesses sybils}
                         votes)]
+    ;; `witness-set` INCLUDES the Sybils: this is the permissionless-admission
+    ;; case ADR-2607994000 describes, where anyone may register. Membership is
+    ;; therefore satisfied and settles nothing — which is the point. Where
+    ;; admission is managed, membership alone stops this attack; where it is
+    ;; open, only stake does.
     (is (nil? (att/verify-certificate qc chain (q/for-set-size (count witness-set))
-                                      verify))
-        "forty real signatures satisfy a head count")
+                                      verify witness-set))
+        "forty real signatures, all from admitted identities, satisfy a head count")
     (is (= :below-quorum
            (att/verify-certificate qc chain (q/stake-weighted bonds witness-set)
-                                   verify))
-        "and buy no stake — which is the whole point")))
+                                   verify witness-set))
+        "and buy no stake — which is the whole point")
+    (is (= :not-admitted
+           (att/verify-certificate qc chain (q/for-set-size (count witness-set))
+                                   verify honest-bonds))
+        "under MANAGED admission the same certificate never reaches the quorum question")))
 
 (deftest sync-takes-a-quorum-predicate
   ;; Above genesis. A certificate for height zero is exempt in inga.sync — the
