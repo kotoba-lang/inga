@@ -120,7 +120,7 @@
   (testing ":slash does NOT throw -- anyone may submit one about anyone, so a
             throw would let one forged accusation halt every replica"
     (let [t (table-after [(slash-of "ghost" 3)])]
-      (is (= [{:witness "ghost" :reason :not-bonded}] (:rejected-slashes t)))
+      (is (= {"ghost" {:not-bonded 1}} (:rejected-slashes t)))
       (is (empty? (:slashes t))))))
 
 ;; ── G2: a slash must carry its proof, and this fold must check it ───────────
@@ -141,7 +141,7 @@
             because the method validated only that w1 had a bond."
     (let [t (power/apply-events bonded 2 [{:event :slash :witness "w1" :terms {}}]
                                 {:verify-sig-fn accepts-every-signature})]
-      (is (= [{:witness "w1" :reason :no-evidence}] (:rejected-slashes t)))
+      (is (= {"w1" {:no-evidence 1}} (:rejected-slashes t)))
       (is (= 100 (get-in t [:bonds "w1" :amount])) "the bond is untouched")
       (is (empty? (:slashes t))))))
 
@@ -151,7 +151,7 @@
                                 [{:event :slash :witness "w1" :terms {}
                                   :evidence (equivocation "w2" 7)}]
                                 {:verify-sig-fn accepts-every-signature})]
-      (is (= [{:witness "w1" :reason :evidence-names-another-witness}] (:rejected-slashes t)))
+      (is (= {"w1" {:evidence-names-another-witness 1}} (:rejected-slashes t)))
       (is (= 100 (get-in t [:bonds "w1" :amount])))
       (is (= 100 (get-in t [:bonds "w2" :amount])) "and w2 is not slashed either"))))
 
@@ -160,7 +160,7 @@
             signatures are re-checked here, not trusted from the proposer"
     (let [t (power/apply-events bonded 2 [(slash-of "w1" 7)]
                                 {:verify-sig-fn accepts-no-signature})]
-      (is (= [{:witness "w1" :reason :evidence-did-not-verify}] (:rejected-slashes t)))
+      (is (= {"w1" {:evidence-did-not-verify 1}} (:rejected-slashes t)))
       (is (= 100 (get-in t [:bonds "w1" :amount]))))))
 
 (deftest two-votes-for-the-same-block-are-not-equivocation
@@ -173,7 +173,7 @@
                                 [{:event :slash :witness "w1" :terms {}
                                   :evidence not-a-double-vote}]
                                 {:verify-sig-fn accepts-every-signature})]
-      (is (= [{:witness "w1" :reason :evidence-did-not-verify}] (:rejected-slashes t)))
+      (is (= {"w1" {:evidence-did-not-verify 1}} (:rejected-slashes t)))
       (is (= 100 (get-in t [:bonds "w1" :amount]))))))
 
 (deftest the-same-proof-cannot-punish-twice
@@ -189,7 +189,7 @@
           again (power/apply-events rebonded 4 [(slash-of "w1" 7)] opts)]
       (is (= 100 (get-in again [:bonds "w1" :amount]))
           "the re-bonded collateral survives the replayed proof")
-      (is (= [{:witness "w1" :reason :already-punished}] (:rejected-slashes again)))
+      (is (= {"w1" {:already-punished 1}} (:rejected-slashes again)))
       (is (= 1 (count (:slashes again))) "still exactly one slash on record"))
     (testing "but a DIFFERENT height is a different offence and does apply"
       (let [opts {:verify-sig-fn accepts-every-signature}
@@ -210,9 +210,33 @@
                                   :evidence (equivocation "w3" 4)}
                                  (slash-of "w3" 5)]
                                 {:verify-sig-fn accepts-no-signature})]
-      (is (= [{:witness "w1" :reason :no-evidence}
-              {:witness "w2" :reason :evidence-names-another-witness}
-              {:witness "w3" :reason :evidence-did-not-verify}]
+      (is (= {"w1" {:no-evidence 1}
+              "w2" {:evidence-names-another-witness 1}
+              "w3" {:evidence-did-not-verify 1}}
              (:rejected-slashes t)))
       (is (= 400 (stake/total-stake (power/bonds t) ["w1" "w2" "w3" "w4"]))
           "nobody lost anything"))))
+
+(deftest refusal-bookkeeping-is-bounded-under-a-flood
+  (testing "`:rejected-slashes` is ATTACKER-CHOSEN data in state folded across
+            the whole chain and hashed into a state root. The first version of
+            this appended to a vector, so a proposer could grow it without
+            bound forever at the cost of block space alone. Counting keeps the
+            same answer -- who was accused, how, how often -- in a map bounded
+            by the witness set times the fixed reason set."
+    (let [opts {:verify-sig-fn accepts-every-signature}
+          flood (repeat 500 {:event :slash :witness "w1" :terms {}})
+          t (power/apply-events bonded 2 flood opts)]
+      (is (= {"w1" {:no-evidence 500}} (:rejected-slashes t))
+          "one entry, not 500")
+      (is (= 1 (count (:rejected-slashes t))))
+      (is (= 100 (get-in t [:bonds "w1" :amount])) "and nothing was taken"))))
+
+(deftest a-successful-slash-still-appends-because-the-attacker-does-not-choose-it
+  (testing "the asymmetry that justifies the two shapes: appending to :slashes
+            requires a verified proof AND costs the offender their whole bond"
+    (let [opts {:verify-sig-fn accepts-every-signature}
+          t (power/apply-events bonded 2 [(slash-of "w1" 7) (slash-of "w2" 8)] opts)]
+      (is (vector? (:slashes t)))
+      (is (= 2 (count (:slashes t))))
+      (is (= #{["w1" 7] ["w2" 8]} (:punished t))))))

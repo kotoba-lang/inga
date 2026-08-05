@@ -91,7 +91,7 @@ This is what makes **ADR-2608039000** (`blockchain / 分散型経路に D1 を�
 ## Verification
 
 ```bash
-clojure -M:test      # 307 tests, 1,413 assertions
+clojure -M:test      # 309 tests, 1,419 assertions
 clojure -M:lint      # 0 errors, 9 warnings (all pre-existing, in test/)
 clojure -M:parity    # and the same on nbb -- both must print one line
 nbb --classpath "src:$(clojure -Spath | tr ':' '\n' | grep kotobase-storage)" \
@@ -587,6 +587,16 @@ of them invisible. Whether evidence verifies is a function of the committed
 bytes, so refusing is deterministic and does not diverge; that is what
 separates this from the `:default` method, where "unknown" depends on the
 replica's code version and therefore must throw.
+
+They are **counted, not listed**: `{witness {reason count}}`. The first
+version appended a map to a vector, which was wrong for the same reason the
+throw was — that is attacker-chosen data in state folded across the whole
+chain and hashed into a state root, and a proposer could grow it without
+bound forever at the cost of block space alone. The tally is bounded by the
+witness set times the fixed reason set and answers the same question. By
+contrast `:slashes` keeps its vector, because only a *successful* slash
+appends to it and each one costs the offender their entire bond: the
+attacker does not choose that one.
 
 Missing `:verify-sig-fn` **does** throw. A replica that cannot check evidence
 must not quietly record refusals while its correctly-configured peers apply
