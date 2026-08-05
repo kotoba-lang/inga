@@ -124,3 +124,21 @@
                       (is (false? (:certified? out)))
                       (is (true? (:timed-out? out)))
                       (done))))))))
+
+#?(:cljs
+   (deftest async-propose-accepts-a-promise-returning-committed
+     ;; The first real deployment's committed prefix is an HTTP round trip.
+     ;; Before this, `committed` was folded as a value, a promise folded to
+     ;; nothing, and every proposal timed out.
+     (async done
+       (let [committed (atom [])
+             clock (atom 0)
+             p (propose/async-propose!
+                {:submit! (fn [r] (js/setTimeout #(swap! committed conj r) 5))
+                 :committed (fn [] (js/Promise.resolve @committed))
+                 :now-ms (fn [] (swap! clock + 1))
+                 :timeout-ms 100000 :poll-ms 1})]
+         (-> (p mine)
+             (.then (fn [out]
+                      (is (true? (:certified? out)))
+                      (done))))))))
