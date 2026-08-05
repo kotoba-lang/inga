@@ -111,21 +111,41 @@
   `arrangement/restore` takes, and reimplementing its envelope here would be
   two encodings of one thing.
 
-  ## What two roots does NOT close yet
+  ## Emission has to be a pure function of the transition
 
-  - **Emission is opt-in, not enforced.** `:emit-fn` derives datoms from an
-    actor op in the same step. Supply `default-emit` (or your own) and the
+  `:emit-fn` is `(fn [actor-op prev-actor next-actor] -> [datom-op …])` and it
+  runs inside the same `apply-op` call as the mutation, so a source change and
+  its projection cannot land in different blocks. It is also **charged for**:
+  an actor op costs `cost-fn` for itself plus `cost-fn` over every datom it
+  projects, as ONE unit. Both halves matter and for the same reason —
+  a block that ran out of fuel between a mutation and its projection would
+  commit a state whose index disagrees with its source, and no peer could tell
+  that apart from an honest one.
+
+  What the network enforces, rather than what this docstring asks for: the
+  projection is inside the state root, so an `emit-fn` that reads anything
+  outside `[op prev next]` makes replicas produce different roots from the same
+  block. `emission-is-deterministic-or-replicas-split` demonstrates exactly
+  that, and shows the split lands in the `datoms` child while the `actors`
+  child stays identical.
+
+  ## What is still NOT closed
+
+  - **Emission is opt-in.** Supply `default-emit` (or your own) and the
     projection tracks the source; supply nothing and the two roots are
-    independent trees — honest, but not yet the invariant the ADR states.
-    Closing that is ADR-2608059000's step 3, where emission becomes a
-    `.kotoba` pure function.
-  - **Emission is not separately metered.** `cost-fn` sees the actor op, not
-    the datoms it expands into, so a caller running with `:fuel` must price
-    actor ops with their emission in mind. Pretending otherwise would put a
-    number in the fuel ledger that does not match the work done.
+    independent trees. Making it mandatory is a policy decision, not a
+    mechanism one, and nothing here forces it.
+  - **Emission is not written in `.kotoba`.** ADR-2608059000's step 3 asks for
+    that and it is not possible today: measured 2026-08-05 against
+    `kotoba compile --target wasm`, a vector literal lowers and `defrecord`
+    lowers, but `count` and `nth` over a vector have **no admitted lowering**
+    (`:phase :subset`). A module can therefore BUILD the vector of datom ops
+    emission returns and nothing can consume it. That is the same wall
+    `kotoba/fuel.kotoba` documents from the other side when it says it keeps
+    to the scalar subset rather than returning a pair.
   - **`:prev` advances nowhere.** `init-fn` seeds it nil and no path writes
     it, so every StateRoot so far carries a null `prev`. That was already
-    true before this change (it was passed to `arrangement/commit!` and was
+    true before two roots (it was passed to `arrangement/commit!` and was
     always nil); what moved is only which node the chain belongs to.
   "
   (:require [arrangement.core :as arr]
@@ -223,6 +243,25 @@
 
 (def ^:private actor-ops #{:actor-put :actor-delete})
 
+(defn- actor-op-transition
+  "`[prev next]` for an actor op against `state`. Shared by the applier and
+  the fuel accountant so the two cannot disagree about what an op does — the
+  cost of an op has to be computed from the same transition that is then
+  applied, or a replica charges for one thing and performs another."
+  [state {:keys [op address] :as o}]
+  (when-not (string? address)
+    (throw (ex-info "inga.state: an actor op needs an :address"
+                    {:type :inga.state/missing-address :op op})))
+  [(get-in state [:actors address])
+   (when (= :actor-put op) (actor (:actor o)))])
+
+(defn- emitted-ops
+  "The datom ops an actor op projects, or nil when nothing projects them."
+  [emit-fn state o]
+  (when (and emit-fn (contains? actor-ops (:op o)))
+    (let [[prev next] (actor-op-transition state o)]
+      (emit-fn o prev next))))
+
 (defn- apply-op
   "One op against the whole state. Datom ops touch `:db`; actor ops touch
   `:actors` and, when `emit-fn` is supplied, `:db` as well — in THIS call, so
@@ -230,11 +269,7 @@
   [emit-fn state {:keys [op address] :as o}]
   (if-not (contains? actor-ops op)
     (update state :db apply-datom-op o)
-    (let [_ (when-not (string? address)
-              (throw (ex-info "inga.state: an actor op needs an :address"
-                              {:type :inga.state/missing-address :op op})))
-          prev (get-in state [:actors address])
-          next (when (= :actor-put op) (actor (:actor o)))
+    (let [[prev next] (actor-op-transition state o)
           state' (if next
                    (assoc-in state [:actors address] next)
                    (update state :actors dissoc address))]
@@ -369,10 +404,27 @@
        (if-not fuel
          (reduce step state ops)
          (let [height ((:height-fn fuel) block)
+               cost-fn (:cost-fn fuel)
                r (fuel/apply-metered
                   {:state state :ops ops
                    :budget ((:budget-fn fuel) block)
-                   :cost-fn (:cost-fn fuel)
+                   :cost-fn cost-fn
+                   ;; An actor op is charged for the datoms it projects, priced
+                   ;; by the caller's own `cost-fn` — the emission is work, and
+                   ;; a ledger that says otherwise is a ledger two replicas can
+                   ;; agree on while having done different amounts.
+                   ;;
+                   ;; `emit-fn` therefore runs twice per actor op: once to
+                   ;; price the expansion, once to apply it. That is a real
+                   ;; cost and it is the right trade — the alternative is
+                   ;; carrying the first result forward through `apply-metered`,
+                   ;; which would make the metering loop know what an op means.
+                   ;; It is safe only because emission is required to be a pure
+                   ;; function of the transition; if it is not, the two calls
+                   ;; disagree and `emission-is-deterministic-or-replicas-split`
+                   ;; is the test that says so.
+                   :expansion-cost-fn
+                   (fn [s o] (reduce + 0 (map cost-fn (emitted-ops emit-fn s o))))
                    :step step})]
            ;; Into the DB, so `root-fn` covers it. See the ns docstring.
            (update (:state r) :db fuel-datoms height r)))))
