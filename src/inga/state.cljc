@@ -129,6 +129,42 @@
   that, and shows the split lands in the `datoms` child while the `actors`
   child stays identical.
 
+  ## Only this actor may write here (ADR-2608059000 step 4)
+
+  The ADR's reason for putting the actor tree under the datom indices was that
+  it is \"a place to enforce 'only this actor may write here' structurally\".
+  `:authority` is that enforcement: with it configured, every actor op must
+  name an author and `:actor-put`/`:actor-delete` may only write the author's
+  own address. A refused op changes neither root and is COUNTED, per block and
+  per reason, in the db — so a peer that refused a different set of ops
+  reaches a different state root rather than agreeing while having applied
+  something else.
+
+  **What it does not establish is WHO authored an op.** Ops arrive from
+  `decode-block`, the application's own reading of a committed block, and only
+  the application holds the signature that block carried. This namespace
+  enforces the rule given an author; it cannot check the claim. That is the
+  same seam `engi.replica` draws and for the same reason, and it is stated
+  here rather than implied because a reader could otherwise take the check for
+  authentication.
+
+  ## `code` is a CID that runs
+
+  An actor's `code` was a link the tree carried and nothing read. `:invoke-fn`
+  is the seam that runs it: an `:actor-call` op resolves the callee's current
+  `code` and own-`state`, hands them to the seam with the caller and the
+  block's fuel price, and writes back the state root it returns — and nothing
+  else. `balance` is untouched because there is no fee model to move it with,
+  `nonce` because its FVM meaning is the SENDER's counter and this caller need
+  not be an actor at all, and `code` because an actor rewriting its own code
+  mid-call is a decision nobody has made.
+
+  The seam is where `kotoba-lang/codebase` binds in: `evaluator/invoke` runs a
+  definition from its hash alone, hydrating every dependency by CID, and that
+  is exactly an actor code loader. inga does not depend on it — the contract
+  between them is a function shape, the same way `verify-fn` and `sign-fn` are
+  injected rather than imported.
+
   ## What is still NOT closed
 
   - **Emission is opt-in.** Supply `default-emit` (or your own) and the
@@ -147,6 +183,22 @@
     it, so every StateRoot so far carries a null `prev`. That was already
     true before two roots (it was passed to `arrangement/commit!` and was
     always nil); what moved is only which node the chain belongs to.
+  - **Authority is opt-in, and so is what it rests on.** Omit `:authority` and
+    any op writes any address, exactly as before. Configure it and the rule
+    holds only as far as `decode-block` reports a verified author (above).
+  - **A call pays its limit, not its usage.** With `:fuel` on, an
+    `:actor-call` is charged `cost-fn`'s price for the op and the seam is
+    handed that same number as its budget. Refunding the unspent remainder
+    would make an op's cost depend on running it, and `apply-metered` charges
+    before it steps precisely so `spent` can never exceed `budget`.
+  - **An op dropped for want of fuel may already have run.** The accountant
+    prices an op before charging it, and pricing an `:actor-call` means
+    executing it. The execution is discarded with the op — no state moves —
+    but the work was done.
+  - **A missing `:address` still throws rather than refusing.** It predates
+    this namespace's refusal path and is left alone here; adversarial input
+    that is malformed rather than unauthorized deserves the same treatment,
+    and does not have it yet.
   "
   (:require [arrangement.core :as arr]
             [arrangement.datalog :as adl]
@@ -175,15 +227,23 @@
    ["inga.actor/balance" :balance]
    ["inga.actor/code" :code]])
 
+(defn- cid-shaped?
+  "CIDv1 base32 begins `b`. A SHAPE check, not a validity check."
+  [v]
+  (and (string? v) (>= (count v) 20) (= \b (first v))))
+
 (defn- assert-cid-shaped!
   "`ipld/link` accepts any string and only fails much later, inside the codec,
   with a NullPointerException from the base32 decoder — so a caller who passes
   a name or a digest where a CID belongs learns about it from a stack trace in
   a dependency. This is a SHAPE check (CIDv1 base32 begins `b`), not a
-  validity check; it is here to turn that NPE into a sentence."
+  validity check; it is here to turn that NPE into a sentence.
+
+  A CID that arrives from an actor's own code goes through `cid-shaped?`
+  directly instead: that is untrusted output, and refusing the op is the right
+  answer where throwing is the right answer for a caller's own mistake."
   [field v]
-  (when (and (some? v)
-             (not (and (string? v) (>= (count v) 20) (= \b (first v)))))
+  (when (and (some? v) (not (cid-shaped? v)))
     (throw (ex-info "inga.state: an actor's code/state must be a CIDv1 string"
                     {:type :inga.state/not-a-cid :field field :value v})))
   v)
@@ -241,41 +301,167 @@
     (throw (ex-info "inga.state: unknown op"
                     {:type :inga.state/unknown-op :op op}))))
 
-(def ^:private actor-ops #{:actor-put :actor-delete})
+(def ^:private actor-ops #{:actor-put :actor-delete :actor-call})
 
-(defn- actor-op-transition
-  "`[prev next]` for an actor op against `state`. Shared by the applier and
-  the fuel accountant so the two cannot disagree about what an op does — the
-  cost of an op has to be computed from the same transition that is then
-  applied, or a replica charges for one thing and performs another."
-  [state {:keys [op address] :as o}]
+(def ^:private self-write-ops
+  "The ops that WRITE a record directly, and so may only be authored by the
+  address they write. `:actor-call` is not one of them: a call is a message,
+  anyone may send one, and what bounds it is that the applier writes only the
+  CALLEE's own record no matter who called."
+  #{:actor-put :actor-delete})
+
+(def refusal-reasons
+  "The closed set a refusal may name.
+
+  Closed for the reason `inga.power/reject-slash` is counted rather than
+  listed: refusals are folded into state that is hashed into the root, and a
+  reason a caller (or an actor's own code) could choose freely is
+  attacker-chosen data in that state. Bounded by this set times the block, the
+  ledger cannot be grown without bound by anyone who can get an op into a
+  block. `:invoke-fn` may return any of these; anything else it returns is
+  recorded as `:call-failed`, which is a loss of detail and not of safety."
+  #{:no-caller :not-self :no-actor :no-code
+    :not-callable :fuel-exhausted :invalid-result :call-failed})
+
+(defn- transition
+  "`{:prev _ :next _ :delete? _ :refusal _}` for an actor op against `state`.
+
+  Shared by the applier and the fuel accountant so the two cannot disagree
+  about what an op does — the cost of an op has to be computed from the same
+  transition that is then applied, or a replica charges for one thing and
+  performs another. That sharing is also why a refusal is a VALUE here: the
+  accountant asks what an op does before it is paid for, and an op that will
+  be refused must look the same to both."
+  [{:keys [caller-fn invoke-fn call-fuel-fn]} state {:keys [op address] :as o}]
   (when-not (string? address)
     (throw (ex-info "inga.state: an actor op needs an :address"
                     {:type :inga.state/missing-address :op op})))
-  [(get-in state [:actors address])
-   (when (= :actor-put op) (actor (:actor o)))])
+  (let [prev (get-in state [:actors address])
+        caller (when caller-fn (caller-fn o))]
+    (cond
+      ;; ── authority (ADR-2608059000 step 4) ──────────────────────────────
+      ;; What this enforces is the RULE, given an authenticated author. It
+      ;; cannot establish WHO authored an op: ops arrive from `decode-block`,
+      ;; which is the application's reading of a committed block, and only the
+      ;; application holds the signature that block carried. A `decode-block`
+      ;; that reports an author it did not verify defeats this check, and no
+      ;; amount of checking here would notice. The rule is still worth having
+      ;; where it is: it is the actor tree's shape that makes "only this actor
+      ;; may write here" expressible at all, and every replica applies it
+      ;; identically from the committed bytes.
+      (and caller-fn (nil? caller))
+      {:prev prev :refusal :no-caller}
+
+      (and caller-fn (contains? self-write-ops op) (not= caller address))
+      {:prev prev :refusal :not-self}
+
+      (= :actor-put op) {:prev prev :next (actor (:actor o))}
+      (= :actor-delete op) {:prev prev :delete? true}
+
+      ;; ── the call (ADR-2608059000: `code` is a CID that RUNS) ───────────
+      :else
+      (cond
+        ;; A DEPLOYMENT error, not adversarial input, so unlike everything
+        ;; below it throws — same discipline `inga.power` applies to a missing
+        ;; `verify-sig-fn`. A replica that cannot run actor code must not
+        ;; quietly refuse calls its correctly-configured peers execute for
+        ;; real; that is divergence wearing the costume of a policy.
+        (nil? invoke-fn)
+        (throw (ex-info "inga.state: an :actor-call needs an :invoke-fn"
+                        {:type :inga.state/no-invoke-fn :address address}))
+
+        (nil? prev) {:prev prev :refusal :no-actor}
+        (nil? (:code prev)) {:prev prev :refusal :no-code}
+
+        :else
+        (let [r (invoke-fn {:address address :caller caller
+                            :code (:code prev) :state (:state prev)
+                            :method (:method o) :args (:args o)
+                            :fuel (when call-fuel-fn (call-fuel-fn o))})]
+          (cond
+            ;; Also a deployment error: a seam that answers with something
+            ;; other than the two documented shapes is not a refusal, it is a
+            ;; seam nobody can reason about.
+            (not (map? r))
+            (throw (ex-info "inga.state: :invoke-fn returned a non-map"
+                            {:type :inga.state/invalid-invoke-result
+                             :address address :result r}))
+
+            (:refused r)
+            {:prev prev :refusal (if (contains? refusal-reasons (:refused r))
+                                   (:refused r)
+                                   :call-failed)}
+
+            ;; The one thing a call may change is the callee's OWN state root.
+            ;; Not `code` (an actor rewriting its own code mid-call is a
+            ;; different decision, and an unmade one), not `balance` (there is
+            ;; no fee or transfer model here yet and inventing one inside a
+            ;; call would put it beyond review), not `nonce` (its meaning in
+            ;; FVM is the SENDER's message counter, and this caller need not
+            ;; be an actor at all — reusing the name for a revision counter
+            ;; would be a second meaning under one word).
+            (and (some? (:state r)) (not (cid-shaped? (:state r))))
+            {:prev prev :refusal :invalid-result}
+
+            :else {:prev prev :next (assoc prev :state (:state r))}))))))
+
+(defn- transition*
+  "`transition` through a one-entry memo.
+
+  `apply-metered` asks `expansion-cost-fn` what an op expands to and then
+  hands the SAME state and op to `step`, so without this an `:actor-call`
+  would run the actor's code twice per block — once to price it, once to
+  perform it. `emit-fn` already pays that price and its docstring accepts it;
+  actor code is a different order of cost and does not have to.
+
+  Sound because `transition` is a pure function of `[ctx state op]` and the
+  memo is keyed on the IDENTITY of the two things that vary. A stale hit is
+  impossible: the entry is replaced on every miss, and a different state or a
+  different op is a different reference."
+  [{:keys [cache] :as ctx} state o]
+  (if-not cache
+    (transition ctx state o)
+    (let [c @cache]
+      (if (and c (identical? (:state c) state) (identical? (:op c) o))
+        (:result c)
+        (let [r (transition ctx state o)]
+          (vreset! cache {:state state :op o :result r})
+          r)))))
 
 (defn- emitted-ops
-  "The datom ops an actor op projects, or nil when nothing projects them."
-  [emit-fn state o]
-  (when (and emit-fn (contains? actor-ops (:op o)))
-    (let [[prev next] (actor-op-transition state o)]
-      (emit-fn o prev next))))
+  "The datom ops an actor op projects, or nil when nothing projects them.
+
+  A refused op projects nothing, which is the same answer as no `emit-fn`:
+  the source did not change, so neither may the projection."
+  [ctx state o]
+  (when (and (:emit-fn ctx) (contains? actor-ops (:op o)))
+    (let [{:keys [prev next refusal]} (transition* ctx state o)]
+      (when-not refusal
+        ((:emit-fn ctx) o prev next)))))
 
 (defn- apply-op
   "One op against the whole state. Datom ops touch `:db`; actor ops touch
   `:actors` and, when `emit-fn` is supplied, `:db` as well — in THIS call, so
-  that a source mutation and its projection cannot land in different blocks."
-  [emit-fn state {:keys [op address] :as o}]
+  that a source mutation and its projection cannot land in different blocks.
+
+  A refused op changes no state and is COUNTED. Refusing rather than throwing
+  is the same judgement `inga.power/reject-slash` makes and for the same
+  reason: an op anyone may author is adversarial input by construction, and
+  adversarial input must not be able to stop the chain."
+  [{:keys [emit-fn refusals] :as ctx} state {:keys [op address] :as o}]
   (if-not (contains? actor-ops op)
     (update state :db apply-datom-op o)
-    (let [[prev next] (actor-op-transition state o)
-          state' (if next
-                   (assoc-in state [:actors address] next)
-                   (update state :actors dissoc address))]
-      (if-not emit-fn
-        state'
-        (update state' :db #(reduce apply-datom-op % (emit-fn o prev next)))))))
+    (let [{:keys [prev next delete? refusal]} (transition* ctx state o)]
+      (if refusal
+        (do (when refusals (vswap! refusals update refusal (fnil inc 0)))
+            state)
+        (let [state' (cond
+                       delete? (update state :actors dissoc address)
+                       next (assoc-in state [:actors address] next)
+                       :else state)]
+          (if-not emit-fn
+            state'
+            (update state' :db #(reduce apply-datom-op % (emit-fn o prev next)))))))))
 
 (defn- fuel-datoms
   "Write one block's fuel outcome into the db.
@@ -293,6 +479,24 @@
               exhausted-at
               (conj {:op :assert :s s :p "inga.fuel/exhausted-at" :o exhausted-at}
                     {:op :assert :s s :p "inga.fuel/dropped" :o dropped})))))
+
+(defn- refusal-datoms
+  "Write one block's refusals into the db, per reason.
+
+  **Counted, not listed**, for the reason `inga.power/reject-slash` gives at
+  length: this is data an attacker chooses, folded across the chain and hashed
+  into a root. `{reason count}` over the closed `refusal-reasons` set is
+  bounded by that set times the block; a list of refused ops would be bounded
+  by nothing but block space, forever.
+
+  Sorted by reason because a map's iteration order is not a property two
+  runtimes share, and an index built in a different order is a different root
+  — the one bug class this whole namespace exists to make impossible."
+  [db height counts]
+  (reduce apply-datom-op db
+          (for [[reason n] (sort-by (comp name key) counts)]
+            {:op :assert :s (str "inga.refusal/block/" height)
+             :p (str "inga.refusal/" (name reason)) :o n})))
 
 ;; ── the two roots ───────────────────────────────────────────────────────────
 
@@ -369,14 +573,49 @@
   policy; omitting it leaves the two roots independent, which is legal and is
   what ADR-2608059000's step 3 closes.
 
+  `:authority` is optional `{:caller-fn (fn [op] -> address-or-nil)}`,
+  defaulting to `:caller` — ADR-2608059000 step 4. Supplied, every actor op
+  must name an author, and `:actor-put`/`:actor-delete` may only write the
+  author's OWN address. Omitted, any op may write any address, which is what
+  every deployment before this did.
+
+  `:invoke-fn` is optional
+  `(fn [{:keys [address caller code state method args fuel]}]
+     -> {:state cid-or-nil} | {:refused reason})`
+  — what makes an actor's `code` a CID that RUNS rather than a CID that is
+  merely stored. It is handed the callee's current own-state root and returns
+  the next one; the applier writes that and nothing else.
+
+  Three properties it MUST have, none of which this namespace can check:
+
+  - **Pure.** A function of its argument alone. Two replicas that disagree
+    produce different actor trees from the same block, which is the same
+    failure `emission-is-deterministic-or-replicas-split` demonstrates for
+    emission, in the other root.
+  - **Total.** It returns `{:refused …}` where it cannot proceed; it does not
+    throw. A replica that throws has left the protocol (see `inga.fuel`), and
+    running untrusted code is exactly where a throw is easiest to provoke.
+  - **Bounded.** With `:fuel` configured it receives the block's price for
+    that op as `:fuel` and must not exceed it.
+
+  `:height-fn` is `(fn [block] -> int)` and is REQUIRED alongside `:authority`
+  or `:invoke-fn`, for the same reason `:fuel` requires its own: a refusal
+  nobody can locate in the chain is not a record. Pass the same function
+  twice if you configure both — `:fuel`'s own is unchanged, so no existing
+  caller moves.
+
   Ops are `{:op :assert|:retract :s _ :p _ :o _}` for datoms and
   `{:op :actor-put :address _ :actor {…}}` / `{:op :actor-delete :address _}`
-  for actors. Actor ops are DATA, not functions: a block has to decode to the
-  same ops on every replica, and a closure does not travel.
+  / `{:op :actor-call :address _ :method _ :args _}` for actors. Actor ops are
+  DATA, not functions: a block has to decode to the same ops on every replica,
+  and a closure does not travel. That is also why a call names a `:method` and
+  carries `:args` rather than carrying code — the code is already in the tree,
+  addressed by hash.
 
   Returns `{:init-fn :apply-fn :root-fn :root-kind :hydrate-fn}`. The first
   three are the shape the replica already takes."
-  [{:keys [decode-block put! get-fn blind-fn encrypt-fn fuel emit-fn]}]
+  [{:keys [decode-block put! get-fn blind-fn encrypt-fn fuel emit-fn
+           authority invoke-fn height-fn]}]
   (doseq [[k v] {:decode-block decode-block :put! put! :get-fn get-fn
                  :blind-fn blind-fn :encrypt-fn encrypt-fn}]
     (when-not (ifn? v)
@@ -385,11 +624,23 @@
   (when (and (some? emit-fn) (not (ifn? emit-fn)))
     (throw (ex-info "inga.state/machine: :emit-fn is not callable"
                     {:type :inga.state/invalid-seam :seam :emit-fn})))
+  (when (and (some? invoke-fn) (not (ifn? invoke-fn)))
+    (throw (ex-info "inga.state/machine: :invoke-fn is not callable"
+                    {:type :inga.state/invalid-seam :seam :invoke-fn})))
   (when fuel
     (doseq [k [:budget-fn :cost-fn :height-fn]]
       (when-not (ifn? (get fuel k))
         (throw (ex-info "inga.state/machine: :fuel needs budget-fn, cost-fn and height-fn"
                         {:type :inga.state/invalid-fuel :seam k})))))
+  (when (and (some? authority) (not (ifn? (or (:caller-fn authority) :caller))))
+    (throw (ex-info "inga.state/machine: :authority's :caller-fn is not callable"
+                    {:type :inga.state/invalid-seam :seam :caller-fn})))
+  ;; Refused early rather than at the first refusal: a machine that can refuse
+  ;; but cannot say at what height would run for a long time looking correct,
+  ;; and fail on exactly the block a deployment most wants the record of.
+  (when (and (or authority invoke-fn) (not (ifn? height-fn)))
+    (throw (ex-info "inga.state/machine: :authority and :invoke-fn need a :height-fn"
+                    {:type :inga.state/invalid-seam :seam :height-fn})))
   {:root-kind :cid
    ;; A THUNK, not a value. engi's own ADR-2608022600 found this the hard
    ;; way: a machine map holding a ready-made exchange handed every replica
@@ -400,9 +651,33 @@
    :apply-fn
    (fn [state block]
      (let [ops (decode-block block)
-           step (fn [s op] (apply-op emit-fn s op))]
+           ;; Per BLOCK, not per machine. The memo is only sound within one
+           ;; application (it is keyed on reference identity), and a refusal
+           ;; tally that outlived its block would be counted into every root
+           ;; after it.
+           refusals (volatile! {})
+           ctx {:emit-fn emit-fn
+                :invoke-fn invoke-fn
+                :caller-fn (when authority (or (:caller-fn authority) :caller))
+                ;; The block's price for the op IS the call's budget: you pay
+                ;; the limit, not the usage. Refunding the difference would
+                ;; make an op's cost depend on running it, and `apply-metered`
+                ;; charges before it steps precisely so that `spent` can never
+                ;; exceed `budget`. Ethereum's gas limit is the same trade for
+                ;; the same reason.
+                :call-fuel-fn (when fuel (:cost-fn fuel))
+                :cache (volatile! nil)
+                :refusals refusals}
+           step (fn [s op] (apply-op ctx s op))
+           ;; Refusals land in the db, so `root-fn` covers them: a replica
+           ;; that refused a different set of ops reaches a different root
+           ;; rather than agreeing while having done something else.
+           with-refusals (fn [s]
+                           (if (seq @refusals)
+                             (update s :db refusal-datoms (height-fn block) @refusals)
+                             s))]
        (if-not fuel
-         (reduce step state ops)
+         (with-refusals (reduce step state ops))
          (let [height ((:height-fn fuel) block)
                cost-fn (:cost-fn fuel)
                r (fuel/apply-metered
@@ -424,10 +699,10 @@
                    ;; disagree and `emission-is-deterministic-or-replicas-split`
                    ;; is the test that says so.
                    :expansion-cost-fn
-                   (fn [s o] (reduce + 0 (map cost-fn (emitted-ops emit-fn s o))))
+                   (fn [s o] (reduce + 0 (map cost-fn (emitted-ops ctx s o))))
                    :step step})]
            ;; Into the DB, so `root-fn` covers it. See the ns docstring.
-           (update (:state r) :db fuel-datoms height r)))))
+           (with-refusals (update (:state r) :db fuel-datoms height r))))))
    :root-fn
    (fn [state]
      ;; Content-addressed: the same actors + db + prev commit to the same CID,

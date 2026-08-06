@@ -520,3 +520,223 @@
       (is (= #{[0]} (state/query st {:find '[?v]
                                      :where '[["inga.fuel/block/1" "inga.fuel/exhausted-at" ?v]]}))
           "it is recorded as exhausted at op 0, which is what a peer checks"))))
+
+;; ── ADR-2608059000 step 4: only this actor may write here ───────────────────
+;;
+;; The ADR's reason for putting the actor tree UNDER the datom indices is that
+;; it is "a place to enforce 'only this actor may write here' structurally".
+;; Step 1 built the tree; the enforcement is this section. What is under test
+;; is not that a check exists but that a refused op leaves NO trace in either
+;; root except the counted refusal — a rule that half-applies is worse than
+;; none, because the half that landed is what a peer would have to detect.
+
+(defn- governed-machine
+  "A machine with `:authority` on, and optionally an `:invoke-fn` and `:fuel`."
+  ([blocks] (governed-machine blocks nil nil))
+  ([blocks invoke-fn] (governed-machine blocks invoke-fn nil))
+  ([blocks invoke-fn fuel]
+   (state/machine
+    (cond-> {:decode-block :ops
+             :emit-fn state/default-emit
+             :put! (fn [cid bytes] (swap! blocks assoc cid bytes))
+             :get-fn (fn [cid] (get @blocks cid))
+             :blind-fn blind
+             :encrypt-fn crypt
+             :authority {}                       ; default caller-fn is :caller
+             :height-fn :height}
+      invoke-fn (assoc :invoke-fn invoke-fn)
+      fuel (assoc :fuel fuel)))))
+
+(defn- refusals-of [st height reason]
+  (state/query st {:find '[?v]
+                   :where [[(str "inga.refusal/block/" height)
+                            (str "inga.refusal/" (name reason)) '?v]]}))
+
+(deftest an-actor-may-only-write-its-own-address
+  (let [m (governed-machine (store))
+        st ((:apply-fn m) ((:init-fn m))
+            {:height 1
+             :ops [{:op :actor-put :address "alice" :caller "alice"
+                    :actor {:balance 100}}
+                   {:op :actor-put :address "bob" :caller "alice"
+                    :actor {:balance 999}}]})]
+    (is (= 100 (:balance (get (state/actors st) "alice")))
+        "writing your own record is what an actor op is for")
+    (is (nil? (get (state/actors st) "bob"))
+        "and writing someone else's is refused, not applied")
+    (is (empty? (state/query st {:find '[?v]
+                                 :where '[["bob" "inga.actor/balance" ?v]]}))
+        "the projection did not land either — a refusal is refused in BOTH roots")
+    (is (= #{[1]} (refusals-of st 1 :not-self))
+        "and it is counted, so a flood of forged writes is attributable")))
+
+(deftest an-op-with-no-author-is-refused
+  (testing "authority on and nobody named: there is no rule to apply, so no write"
+    (let [m (governed-machine (store))
+          st ((:apply-fn m) ((:init-fn m))
+              {:height 4 :ops [{:op :actor-put :address "alice" :actor {:balance 1}}]})]
+      (is (empty? (state/actors st)))
+      (is (= #{[1]} (refusals-of st 4 :no-caller))))))
+
+(deftest without-authority-any-op-may-write-any-address
+  (testing "the honest statement of what every deployment before step 4 did"
+    (let [m (machine-on (store) state/default-emit)   ; no :authority
+          st (run m [[{:op :actor-put :address "bob" :caller "alice"
+                       :actor {:balance 999}}]])]
+      (is (= 999 (:balance (get (state/actors st) "bob")))))))
+
+(deftest a-caller-fn-may-read-the-author-from-anywhere-in-the-op
+  (testing ":caller is a default, not a schema — decode-block owns the shape"
+    (let [blocks (store)
+          m (state/machine {:decode-block :ops
+                            :put! (fn [cid bytes] (swap! blocks assoc cid bytes))
+                            :get-fn (fn [cid] (get @blocks cid))
+                            :blind-fn blind :encrypt-fn crypt
+                            :authority {:caller-fn (comp :did :envelope)}
+                            :height-fn :height})
+          st ((:apply-fn m) ((:init-fn m))
+              {:height 1 :ops [{:op :actor-put :address "alice"
+                                :envelope {:did "alice"} :actor {:balance 7}}]})]
+      (is (= 7 (:balance (get (state/actors st) "alice")))))))
+
+(defn- refusal-root-assertions [[with-refused without-op]]
+  (is (not= with-refused without-op)
+      "a refusal is a FACT in the root, not a silent drop: the same applied ops
+       reached a different root because one block also refused something, which
+       is what makes a replica that refused a different set visibly wrong"))
+
+(deftest a-refusal-is-inside-the-root
+  (let [blocks (store)
+        m (governed-machine blocks)
+        mine {:op :actor-put :address "alice" :caller "alice" :actor {:balance 1}}
+        theirs {:op :actor-put :address "bob" :caller "alice" :actor {:balance 2}}
+        roots [((:root-fn m) ((:apply-fn m) ((:init-fn m))
+                              {:height 1 :ops [mine theirs]}))
+               ((:root-fn m) ((:apply-fn m) ((:init-fn m))
+                              {:height 1 :ops [mine]}))]]
+    #?(:clj (refusal-root-assertions roots)
+       :cljs (async done (settle roots (fn [rs] (refusal-root-assertions rs) (done)))))))
+
+;; ── the call: `code` is a CID that RUNS ──────────────────────────────────────
+;;
+;; Before this, an actor's `code` was a link the tree carried and nothing read.
+;; ADR-2608059000 says the actor tree buys "`code` as the CID of a checked
+;; definition"; a definition nothing invokes is a comment with a hash.
+
+(def next-state-cid (ipld/cid (ipld/encode {"balance-sheet" 2})))
+
+(defn- put-alice [code]
+  {:op :actor-put :address "alice" :caller "alice"
+   :actor {:code code :state state-cid :nonce 1 :balance 100}})
+
+(deftest a-call-runs-the-actors-code-and-writes-only-its-own-state
+  (let [seen (atom [])
+        invoke (fn [arg] (swap! seen conj arg) {:state next-state-cid})
+        m (governed-machine (store) invoke)
+        st ((:apply-fn m) ((:init-fn m))
+            {:height 1 :ops [(put-alice code-cid)
+                             {:op :actor-call :address "alice" :caller "bob"
+                              :method "credit" :args [5]}]})
+        alice (get (state/actors st) "alice")]
+    (is (= next-state-cid (:state alice))
+        "the call advanced the callee's own state root")
+    (is (= [100 1 code-cid] [(:balance alice) (:nonce alice) (:code alice)])
+        "and touched nothing else — balance, nonce and code are not a call's to move")
+    (is (= [{:address "alice" :caller "bob" :code code-cid :state state-cid
+             :method "credit" :args [5] :fuel nil}]
+           @seen)
+        "the seam is handed the CURRENT code and state, and who called")))
+
+(deftest anyone-may-call-but-only-the-callee-is-written
+  (testing "a call is a message; self-write is about :actor-put, not about this"
+    (let [m (governed-machine (store) (fn [_] {:state next-state-cid}))
+          st ((:apply-fn m) ((:init-fn m))
+              {:height 1 :ops [(put-alice code-cid)
+                               {:op :actor-call :address "alice" :caller "mallory"}]})]
+      (is (= next-state-cid (:state (get (state/actors st) "alice"))))
+      (is (nil? (get (state/actors st) "mallory"))
+          "and the caller did not come into existence by calling"))))
+
+(deftest a-call-that-cannot-run-is-refused-and-counted
+  (let [m (governed-machine (store) (fn [_] {:state next-state-cid}))
+        st ((:apply-fn m) ((:init-fn m))
+            {:height 2 :ops [{:op :actor-put :address "alice" :caller "alice"
+                              :actor {:balance 1}}          ; no :code
+                             {:op :actor-call :address "alice" :caller "alice"}
+                             {:op :actor-call :address "ghost" :caller "alice"}]})]
+    (is (= #{[1]} (refusals-of st 2 :no-code)))
+    (is (= #{[1]} (refusals-of st 2 :no-actor)))
+    (is (= 1 (:balance (get (state/actors st) "alice")))
+        "the refusals changed nothing")))
+
+(deftest a-call-result-that-is-not-a-cid-is-refused-not-thrown
+  (testing "untrusted OUTPUT: refusing is right where throwing is right for a caller's own mistake"
+    (let [m (governed-machine (store) (fn [_] {:state "definitely-not-a-cid"}))
+          st ((:apply-fn m) ((:init-fn m))
+              {:height 3 :ops [(put-alice code-cid)
+                               {:op :actor-call :address "alice" :caller "alice"}]})]
+      (is (= state-cid (:state (get (state/actors st) "alice"))))
+      (is (= #{[1]} (refusals-of st 3 :invalid-result))))))
+
+(deftest a-reason-outside-the-closed-set-is-recorded-as-call-failed
+  (testing "otherwise the ledger's key space is chosen by the code being run"
+    (let [m (governed-machine (store) (fn [_] {:refused :i-just-felt-like-it}))
+          st ((:apply-fn m) ((:init-fn m))
+              {:height 5 :ops [(put-alice code-cid)
+                               {:op :actor-call :address "alice" :caller "alice"}]})]
+      (is (= #{[1]} (refusals-of st 5 :call-failed)))
+      (is (empty? (refusals-of st 5 :i-just-felt-like-it))))))
+
+(deftest a-call-with-no-invoke-fn-is-a-deployment-error
+  (testing "a replica that cannot run code must not quietly refuse what its peers execute"
+    (let [m (governed-machine (store))]
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                   ((:apply-fn m) ((:init-fn m))
+                    {:height 1 :ops [(put-alice code-cid)
+                                     {:op :actor-call :address "alice" :caller "alice"}]}))))))
+
+(deftest an-invoke-fn-that-answers-with-neither-shape-is-a-deployment-error
+  (let [m (governed-machine (store) (fn [_] :yes))]
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 ((:apply-fn m) ((:init-fn m))
+                  {:height 1 :ops [(put-alice code-cid)
+                                   {:op :actor-call :address "alice" :caller "alice"}]})))))
+
+(deftest authority-and-invoke-need-a-height-fn
+  (testing "a refusal nobody can locate in the chain is not a record"
+    (let [base {:decode-block :ops :put! (fn [_ _]) :get-fn (constantly nil)
+                :blind-fn blind :encrypt-fn crypt}]
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                   (state/machine (assoc base :authority {}))))
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                   (state/machine (assoc base :invoke-fn (fn [_] {})))))
+      (is (some? (state/machine (assoc base :authority {} :height-fn :height)))))))
+
+;; ── metering a call ──────────────────────────────────────────────────────────
+
+(def ^:private call-fuel
+  {:budget-fn (constantly 100) :cost-fn (fuel/fixed-cost 7) :height-fn :height})
+
+(deftest a-metered-call-runs-the-code-once-and-is-handed-its-budget
+  (testing "the price the block charges for the op IS the budget the call may spend"
+    (let [runs (atom [])
+          invoke (fn [arg] (swap! runs conj (:fuel arg)) {:state next-state-cid})
+          m (governed-machine (store) invoke call-fuel)
+          st ((:apply-fn m) ((:init-fn m))
+              {:height 1 :ops [(put-alice code-cid)
+                               {:op :actor-call :address "alice" :caller "alice"}]})]
+      (is (= [7] @runs)
+          "once, not twice: pricing an op and performing it share one execution,
+           which the emission seam does not and says so")
+      (is (= next-state-cid (:state (get (state/actors st) "alice")))))))
+
+(deftest a-refused-op-still-costs-the-block
+  (testing "block space is spent whether or not the op was allowed to do anything"
+    (let [m (governed-machine (store) nil call-fuel)
+          st ((:apply-fn m) ((:init-fn m))
+              {:height 1 :ops [{:op :actor-put :address "bob" :caller "alice"
+                                :actor {:balance 1}}]})]
+      (is (= #{[1]} (refusals-of st 1 :not-self)))
+      (is (= #{[7]} (state/query st {:find '[?v]
+                                     :where '[["inga.fuel/block/1" "inga.fuel/spent" ?v]]}))
+          "charged for itself; its emission expanded to nothing because it was refused"))))
