@@ -148,6 +148,48 @@
   here rather than implied because a reader could otherwise take the check for
   authentication.
 
+  ## A fork is named, and that is what a warrant was for
+
+  Refusals are counted and not listed, for the reason `inga.power/reject-slash`
+  gives: a reason a caller can choose is attacker-chosen data in a hashed root,
+  and a list of refused ops is bounded by nothing but block space. `:forked` is
+  the one refusal that escapes that argument, so it is the one that is written
+  out in full.
+
+  It escapes because a fork can only be refused against an actor that ALREADY
+  EXISTS: `prev` has to be there for its head to disagree with. The subject key
+  is therefore an address that is already a key in the actor tree — the other
+  root of the same commit — so naming it adds no surface an attacker did not
+  already pay for, and one record per forking address per block is bounded by
+  the actor set rather than by block space.
+
+  What gets written is the warrant that `engi.core/warrant` describes: the head
+  the chain actually holds, the parent the refused advance claimed, the entry
+  it offered, and the seq. All of it is in the committed block by construction,
+  so every replica derives the same record from the same bytes.
+
+  **What the record does not prove.** `:forked` fires when an advance does not
+  extend the current head, and a DUPLICATE of an old advance looks the same
+  from a head alone — this layer keeps the head, not the history. The one case
+  that can be told apart is caught: an attempt equal to the current head is the
+  advance that just landed, offered twice, and is counted without being named.
+  A replay from further back is indistinguishable from a fork here, and the
+  record says what was observed rather than what it means: *this address
+  offered X as the child of P at seq N while the chain was at H*. Whoever acts
+  on it — refusing credit, slashing — is the party that has the history to
+  read it against.
+
+  **This is what closes \"warrants are recorded and do not gossip\"**
+  (ADR-2607101200's neighbourhood-validator gap, inherited from a design that
+  had no total order). Under a total order there is nothing to gossip: a fork
+  cannot land, it is attributed in the state root, and a reader asks
+  `inga.chain/forks` instead of asking the neighbourhood.
+
+  Recording needs `:height-fn`, since a refusal nobody can locate in the chain
+  is not a record. Without one a refusal is still a refusal — no state moves —
+  and nothing is written. Every replica skips it identically, so this costs the
+  record and not the agreement.
+
   ## `code` is a CID that runs
 
   An actor's `code` was a link the tree carried and nothing read. `:invoke-fn`
@@ -379,11 +421,11 @@
 
           ;; A different parent at the same point is a FORK — the agent
           ;; authored two futures from one head. It is refused rather than
-          ;; applied, and the refusal is counted, which is where a warrant
-          ;; would be built from. Propagating that evidence is a named gap
-          ;; (ADR-2608038000: warrants are recorded and do not gossip), so
-          ;; what this buys today is that a fork cannot LAND, not that
-          ;; anyone is told about it.
+          ;; applied, and it is the one refusal recorded WITH its evidence
+          ;; (`fork-datoms`, and the ns docstring for why naming this one is
+          ;; not naming them all). Nothing has to gossip the warrant: the
+          ;; fork cannot land, and the record of it is in the root every
+          ;; replica computes.
           (not= prev-entry (:state prev)) {:prev prev :refusal :forked}
           (not= seq (inc (:nonce prev))) {:prev prev :refusal :out-of-order}
 
@@ -484,12 +526,32 @@
   is the same judgement `inga.power/reject-slash` makes and for the same
   reason: an op anyone may author is adversarial input by construction, and
   adversarial input must not be able to stop the chain."
-  [{:keys [emit-fn refusals] :as ctx} state {:keys [op address] :as o}]
+  [{:keys [emit-fn refusals forks] :as ctx} state {:keys [op address] :as o}]
   (if-not (contains? actor-ops op)
     (update state :db apply-datom-op o)
     (let [{:keys [prev next delete? refusal]} (transition* ctx state o)]
       (if refusal
         (do (when refusals (vswap! refusals update refusal (fnil inc 0)))
+            ;; The first fork an address authors in a block is the record.
+            ;; First rather than last because block order is the only order
+            ;; every replica shares, and a later attempt says nothing the
+            ;; first one did not: the head it forked from is the same head.
+            ;;
+            ;; Except when the attempt IS the head — that is the advance which
+            ;; already landed, offered a second time, and duplication is not
+            ;; misbehaviour. It is still counted (counting is cheap and names
+            ;; nobody); what it must not do is put an agent's address in the
+            ;; root under the word fork. See the ns docstring for the case this
+            ;; does NOT catch.
+            (when (and forks (= :forked refusal)
+                       (not= (:entry o) (:state prev)))
+              (vswap! forks (fn [m]
+                              (if (contains? m address)
+                                m
+                                (assoc m address {:head (:state prev)
+                                                  :claimed-prev (:prev-entry o)
+                                                  :attempt (:entry o)
+                                                  :seq (:seq o)})))))
             state)
         (let [state' (cond
                        delete? (update state :actors dissoc address)
@@ -533,6 +595,45 @@
           (for [[reason n] (sort-by (comp name key) counts)]
             {:op :assert :s (str "inga.refusal/block/" height)
              :p (str "inga.refusal/" (name reason)) :o n})))
+
+(def fork-fields
+  "The evidence one fork record carries, in a fixed order.
+
+  `head` and `attempt` are the two conflicting entries — `engi.core/warrant`'s
+  `evidence-tx-a` / `evidence-tx-b` under the names this layer knows them by.
+  `claimed-prev` is the parent the refused advance named, and it is what makes
+  the pair readable: with it, the record says *this address offered `attempt`
+  as the child of `claimed-prev` at `seq`, while the committed chain was at
+  `head`*. Without it a reader would have two entries and no statement.
+
+  `address` is written as a datom even though the subject contains it, so a
+  reader can join on it instead of parsing a subject string."
+  [["inga.fork/address" :address]
+   ["inga.fork/head" :head]
+   ["inga.fork/claimed-prev" :claimed-prev]
+   ["inga.fork/attempt" :attempt]
+   ["inga.fork/seq" :seq]
+   ["inga.fork/height" :height]])
+
+(defn- fork-datoms
+  "Write one block's forks into the db, WITH the evidence that identifies them.
+
+  The one refusal that is listed rather than only counted; the ns docstring
+  argues why that does not reopen what counting closed. One subject per
+  (block, address) keeps the pairing unambiguous — `arrangement`'s assert is
+  multi-valued, so two attempts under one subject would leave two heads and two
+  attempts in a set with nothing saying which went with which.
+
+  Sorted by address for the same reason `refusal-datoms` sorts by reason: map
+  order is not a property two runtimes share, and an index built in a different
+  order is a different root."
+  [db height forks]
+  (reduce apply-datom-op db
+          (for [[address ev] (sort-by key forks)
+                [p k] fork-fields
+                :let [s (str "inga.fork/block/" height "/" address)]]
+            {:op :assert :s s :p p
+             :o (get (assoc ev :address address :height height) k)})))
 
 ;; ── the two roots ───────────────────────────────────────────────────────────
 
@@ -640,6 +741,11 @@
   twice if you configure both — `:fuel`'s own is unchanged, so no existing
   caller moves.
 
+  It is worth supplying even when neither is configured, because an
+  `:actor-advance` can be refused on its own terms — a fork, a gap in the
+  sequence — and without a height there is nowhere to write that. Omitted,
+  such a refusal still refuses and nothing is recorded.
+
   Ops are `{:op :assert|:retract :s _ :p _ :o _}` for datoms and
   `{:op :actor-put :address _ :actor {…}}` / `{:op :actor-delete :address _}`
   / `{:op :actor-call :address _ :method _ :args _}` /
@@ -696,6 +802,10 @@
            ;; tally that outlived its block would be counted into every root
            ;; after it.
            refusals (volatile! {})
+           ;; Per block for the same reason, and separate from the tally
+           ;; because it is a different KIND of record: counts are bounded by
+           ;; the reason set, this is bounded by the actor set.
+           forks (volatile! {})
            ctx {:emit-fn emit-fn
                 :invoke-fn invoke-fn
                 :caller-fn (when authority (or (:caller-fn authority) :caller))
@@ -707,15 +817,27 @@
                 ;; the same reason.
                 :call-fuel-fn (when fuel (:cost-fn fuel))
                 :cache (volatile! nil)
-                :refusals refusals}
+                :refusals refusals
+                :forks forks}
            step (fn [s op] (apply-op ctx s op))
            ;; Refusals land in the db, so `root-fn` covers them: a replica
            ;; that refused a different set of ops reaches a different root
            ;; rather than agreeing while having done something else.
+           ;;
+           ;; Guarded on `height-fn` because an `:actor-advance` can be refused
+           ;; in a machine that configured neither `:authority` nor
+           ;; `:invoke-fn`, and those are the only two `machine` requires a
+           ;; height for. Recording an unlocatable refusal is not possible, and
+           ;; throwing on adversarial input is what `apply-op` exists to avoid;
+           ;; skipping is identical on every replica, so it costs the record
+           ;; and not the agreement.
            with-refusals (fn [s]
-                           (if (seq @refusals)
-                             (update s :db refusal-datoms (height-fn block) @refusals)
-                             s))]
+                           (if-not (and height-fn (or (seq @refusals) (seq @forks)))
+                             s
+                             (let [h (height-fn block)]
+                               (cond-> s
+                                 (seq @refusals) (update :db refusal-datoms h @refusals)
+                                 (seq @forks) (update :db fork-datoms h @forks)))))]
        (if-not fuel
          (with-refusals (reduce step state ops))
          (let [height ((:height-fn fuel) block)

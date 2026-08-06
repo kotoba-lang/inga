@@ -46,8 +46,24 @@
   This is only reachable if a quorum voted for a proposal nobody can resolve,
   which is what validating BEFORE voting is for. `valid-advance?` is exported
   so the vote path and the apply path use ONE predicate rather than two that
-  can drift."
-  (:require [clojure.string :as str]))
+  can drift.
+
+  ## A fork is a query, not a rumour
+
+  The design this inherits from (ADR-2607101200, and `engi.core/warrant`
+  before it) had a neighbourhood of validators pushing fork evidence at each
+  other, because without a total order nobody else would ever see it. That
+  layer was lost with the Rust workspace and never came back, which is the
+  standing gap \"warrants are recorded and do not gossip\".
+
+  Ordering the heads dissolves it rather than closing it. A fork is two
+  advances from one head, so the SECOND one is refused by `inga.state` in
+  every replica at once, and the evidence is written into the state root
+  (`inga.state`'s fork section for why that one refusal is named rather than
+  only counted). `forks` reads it back. There is nothing left to propagate:
+  the fork never landed, and the record of it is in the root."
+  (:require [clojure.string :as str]
+            [inga.state :as state]))
 
 (defn valid-advance?
   "Shape check for a chain advance. Not a validity check on the entry — see
@@ -108,6 +124,50 @@
                                   :resolved advance})))
                (advance-op advance)))
            (proposals-fn block)))))
+
+(defn forks
+  "Every fork committed state has recorded against `author`, earliest first.
+
+  `[{:height h :head entry :claimed-prev entry :attempt entry :seq n} …]`,
+  empty when the chain is clean. The record reads as one statement: *this
+  author offered `attempt` as the child of `claimed-prev` at `seq`, while the
+  committed chain was at `head`* — `engi.core/warrant`'s two pieces of
+  evidence plus what connects them, derived by every replica from the same
+  block rather than asserted by a detector.
+
+  `inga.state`'s fork section says what this does not prove: a duplicate of an
+  old advance is indistinguishable from a fork at this layer, which keeps the
+  head and not the history.
+
+  Takes the hydrated state (what `inga.state/hydrate-fn` returns), because
+  this reads the datom root while `head` reads the actor root. Two readings of
+  one commit, and neither is a second copy of the other."
+  [state author]
+  (->> (state/query state
+                    {:find '[?h ?head ?claimed ?attempt ?seq]
+                     ;; The author is bound by building the clause rather than
+                     ;; through `:in`, because `inga.state/query` is the two
+                     ;; -arity reading of a hydrated state and widening it for
+                     ;; one caller would be the wrong place to spend an arity.
+                     :where [['?e "inga.fork/address" author]
+                             '[?e "inga.fork/height" ?h]
+                             '[?e "inga.fork/head" ?head]
+                             '[?e "inga.fork/claimed-prev" ?claimed]
+                             '[?e "inga.fork/attempt" ?attempt]
+                             '[?e "inga.fork/seq" ?seq]]})
+       (map (fn [[h head claimed attempt seq]]
+              {:height h :head head :claimed-prev claimed
+               :attempt attempt :seq seq}))
+       (sort-by :height)
+       vec))
+
+(defn forked?
+  "Has `author`'s chain ever forked, according to committed state?
+
+  The question a counterparty asks before extending credit, and the reason
+  the evidence is worth having in the root: it is answerable from state alone,
+  with no neighbourhood to ask and no detector to trust."
+  [state author] (boolean (seq (forks state author))))
 
 (defn head
   "The committed head of an agent's chain: `{:entry cid :seq n}`, or nil.
