@@ -301,14 +301,14 @@
     (throw (ex-info "inga.state: unknown op"
                     {:type :inga.state/unknown-op :op op}))))
 
-(def ^:private actor-ops #{:actor-put :actor-delete :actor-call})
+(def ^:private actor-ops #{:actor-put :actor-delete :actor-call :actor-advance})
 
 (def ^:private self-write-ops
   "The ops that WRITE a record directly, and so may only be authored by the
   address they write. `:actor-call` is not one of them: a call is a message,
   anyone may send one, and what bounds it is that the applier writes only the
   CALLEE's own record no matter who called."
-  #{:actor-put :actor-delete})
+  #{:actor-put :actor-delete :actor-advance})
 
 (def refusal-reasons
   "The closed set a refusal may name.
@@ -321,7 +321,8 @@
   block. `:invoke-fn` may return any of these; anything else it returns is
   recorded as `:call-failed`, which is a loss of detail and not of safety."
   #{:no-caller :not-self :no-actor :no-code
-    :not-callable :fuel-exhausted :invalid-result :call-failed})
+    :not-callable :fuel-exhausted :invalid-result :call-failed
+    :forked :out-of-order})
 
 (defn- transition
   "`{:prev _ :next _ :delete? _ :refusal _}` for an actor op against `state`.
@@ -357,6 +358,41 @@
 
       (= :actor-put op) {:prev prev :next (actor (:actor o))}
       (= :actor-delete op) {:prev prev :delete? true}
+
+      ;; ── the advance of an agent's own source chain ─────────────────────
+      ;; ADR-2608038000 H1: what inga orders is not a transaction, it is the
+      ;; FORWARD MOVEMENT of an agent chain head. The entry itself is opaque
+      ;; — an id this namespace never opens — so ordering stays independent
+      ;; of what any application means by a transaction.
+      (= :actor-advance op)
+      (let [{:keys [seq prev-entry entry]} o]
+        (cond
+          (not (cid-shaped? entry)) {:prev prev :refusal :invalid-result}
+
+          ;; No record yet: this is the agent bringing its own chain into
+          ;; existence, which is the only way an agent may come to exist at
+          ;; all under `self-write-ops`. Genesis is seq 0 from no parent.
+          (nil? prev)
+          (if (and (= 0 seq) (nil? prev-entry))
+            {:prev prev :next (actor {:state entry :nonce 0})}
+            {:prev prev :refusal :out-of-order})
+
+          ;; A different parent at the same point is a FORK — the agent
+          ;; authored two futures from one head. It is refused rather than
+          ;; applied, and the refusal is counted, which is where a warrant
+          ;; would be built from. Propagating that evidence is a named gap
+          ;; (ADR-2608038000: warrants are recorded and do not gossip), so
+          ;; what this buys today is that a fork cannot LAND, not that
+          ;; anyone is told about it.
+          (not= prev-entry (:state prev)) {:prev prev :refusal :forked}
+          (not= seq (inc (:nonce prev))) {:prev prev :refusal :out-of-order}
+
+          ;; `nonce` carries the chain's sequence. Its FVM meaning is the
+          ;; author's own monotonic counter, and here the author IS the
+          ;; subject, so this is that meaning rather than a second one — the
+          ;; reason `:actor-call` was kept away from the same field.
+          :else {:prev prev
+                 :next (assoc prev :state entry :nonce seq)}))
 
       ;; ── the call (ADR-2608059000: `code` is a CID that RUNS) ───────────
       :else
@@ -606,7 +642,11 @@
 
   Ops are `{:op :assert|:retract :s _ :p _ :o _}` for datoms and
   `{:op :actor-put :address _ :actor {…}}` / `{:op :actor-delete :address _}`
-  / `{:op :actor-call :address _ :method _ :args _}` for actors. Actor ops are
+  / `{:op :actor-call :address _ :method _ :args _}` /
+  `{:op :actor-advance :address _ :seq _ :prev-entry _ :entry _}` for actors.
+  The last is what `inga.chain` builds from a committed proposal — the
+  advance of an agent's own source chain, which is what ADR-2608038000 says
+  this layer orders. Actor ops are
   DATA, not functions: a block has to decode to the same ops on every replica,
   and a closure does not travel. That is also why a call names a `:method` and
   carries `:args` rather than carrying code — the code is already in the tree,
