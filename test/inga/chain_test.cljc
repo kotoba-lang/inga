@@ -9,6 +9,7 @@
   agent cannot advance someone else's chain, cannot skip a link, cannot fork,
   and cannot be silently skipped when a replica lacks the body."
   (:require [clojure.test :refer [deftest is testing]]
+            #?(:cljs [clojure.test :refer [async]])
             [ipld.core :as ipld]
             [inga.chain :as chain]
             [inga.state :as state]))
@@ -87,7 +88,139 @@
       (is (= (entry-cid 1) (:entry (chain/head (state/actors st) "alice")))
           "the first advance in the committed order wins")
       (is (= #{[1]} (refusals-of st 2 :forked))
-          "and the fork is counted, which is what a warrant would be built from"))))
+          "and the fork is counted"))))
+
+;; ── the fork is named, which is what the warrant was for ───────────────────
+
+(deftest a-fork-is-named-and-carries-the-evidence
+  (testing "ADR-2607101200's neighbourhood was for pushing this at people;
+            ordered heads make it a reading of committed state instead"
+    (let [entries (atom {"p0" {:author "alice" :seq 0 :prev nil :entry (entry-cid 0)}
+                         "p1" {:author "alice" :seq 1 :prev (entry-cid 0) :entry (entry-cid 1)}
+                         "fork" {:author "alice" :seq 1 :prev (entry-cid 0) :entry (entry-cid 9)}})
+          m (chain-machine (store) entries)
+          st (reduce (:apply-fn m) ((:init-fn m)) [(block 1 "p0") (block 2 "p1" "fork")])]
+      (is (= [{:height 2 :head (entry-cid 1) :claimed-prev (entry-cid 0)
+               :attempt (entry-cid 9) :seq 1}]
+             (chain/forks st "alice"))
+          "one statement: alice offered entry 9 as the child of entry 0 at seq 1,
+           while the chain had already moved to entry 1")
+      (is (chain/forked? st "alice"))
+      (testing "the two conflicting entries are BOTH there, which is what makes
+                it evidence rather than an accusation"
+        (let [{:keys [head attempt claimed-prev]} (first (chain/forks st "alice"))]
+          (is (not= head attempt)
+              "engi.core/warrant's evidence-tx-a and evidence-tx-b")
+          (is (not= claimed-prev head)
+              "and the parent it claimed is not the head it was refused against —
+               without that field the pair would not say anything"))))))
+
+(deftest the-advance-that-landed-offered-twice-is-not-named
+  (testing "a duplicate is not misbehaviour, and naming an agent is not free"
+    (let [entries (atom {"p0" {:author "alice" :seq 0 :prev nil :entry (entry-cid 0)}
+                         "p1" {:author "alice" :seq 1 :prev (entry-cid 0) :entry (entry-cid 1)}})
+          m (chain-machine (store) entries)
+          st (reduce (:apply-fn m) ((:init-fn m))
+                     [(block 1 "p0") (block 2 "p1") (block 3 "p1")])]
+      (is (= (entry-cid 1) (:entry (chain/head (state/actors st) "alice"))))
+      (is (= #{[1]} (refusals-of st 3 :forked))
+          "counted, because counting names nobody")
+      (is (= [] (chain/forks st "alice"))
+          "and not named, because the entry offered IS the head — this is the
+           advance that already landed, arriving a second time"))))
+
+(deftest a-clean-chain-is-not-named
+  (let [entries (atom {"p0" {:author "alice" :seq 0 :prev nil :entry (entry-cid 0)}
+                       "p1" {:author "alice" :seq 1 :prev (entry-cid 0) :entry (entry-cid 1)}})
+        m (chain-machine (store) entries)
+        st (reduce (:apply-fn m) ((:init-fn m)) [(block 1 "p0") (block 2 "p1")])]
+    (is (= [] (chain/forks st "alice")))
+    (is (not (chain/forked? st "alice")))
+    (is (not (chain/forked? st "nobody")) "and an agent with no chain has not forked")))
+
+(deftest only-the-first-fork-an-address-authors-in-a-block-is-recorded
+  (testing "one record per (block, address) — the bound that makes naming this
+            refusal different from listing all of them"
+    (let [entries (atom {"p0" {:author "alice" :seq 0 :prev nil :entry (entry-cid 0)}
+                         "p1" {:author "alice" :seq 1 :prev (entry-cid 0) :entry (entry-cid 1)}
+                         "f1" {:author "alice" :seq 1 :prev (entry-cid 0) :entry (entry-cid 8)}
+                         "f2" {:author "alice" :seq 1 :prev (entry-cid 0) :entry (entry-cid 9)}})
+          m (chain-machine (store) entries)
+          st (reduce (:apply-fn m) ((:init-fn m))
+                     [(block 1 "p0") (block 2 "p1" "f1" "f2")])]
+      (is (= 1 (count (chain/forks st "alice"))))
+      (is (= (entry-cid 8) (:attempt (first (chain/forks st "alice"))))
+          "the first in block order, because block order is the only order every
+           replica shares")
+      (is (= #{[2]} (refusals-of st 2 :forked))
+          "both are still COUNTED — what is bounded is the evidence, not the tally"))))
+
+(deftest every-forking-agent-in-a-block-is-named
+  (let [entries (atom {"a0" {:author "alice" :seq 0 :prev nil :entry (entry-cid 0)}
+                       "b0" {:author "bob" :seq 0 :prev nil :entry (entry-cid 7)}
+                       "a1" {:author "alice" :seq 1 :prev (entry-cid 0) :entry (entry-cid 1)}
+                       "b1" {:author "bob" :seq 1 :prev (entry-cid 7) :entry (entry-cid 2)}
+                       "af" {:author "alice" :seq 1 :prev (entry-cid 0) :entry (entry-cid 8)}
+                       "bf" {:author "bob" :seq 1 :prev (entry-cid 7) :entry (entry-cid 9)}})
+        m (chain-machine (store) entries)
+        st (reduce (:apply-fn m) ((:init-fn m))
+                   [(block 1 "a0" "b0") (block 2 "a1" "b1" "af" "bf")])]
+    (is (= (entry-cid 8) (:attempt (first (chain/forks st "alice")))))
+    (is (= (entry-cid 9) (:attempt (first (chain/forks st "bob"))))
+        "each agent's evidence is its own — the subject is per (block, address)")))
+
+(deftest forks-are-returned-earliest-first
+  (let [entries (atom {"p0" {:author "alice" :seq 0 :prev nil :entry (entry-cid 0)}
+                       "f-a" {:author "alice" :seq 1 :prev (entry-cid 5) :entry (entry-cid 8)}
+                       "f-b" {:author "alice" :seq 1 :prev (entry-cid 6) :entry (entry-cid 9)}})
+        m (chain-machine (store) entries)
+        st (reduce (:apply-fn m) ((:init-fn m))
+                   [(block 1 "p0") (block 2 "f-a") (block 3 "f-b")])]
+    (is (= [2 3] (mapv :height (chain/forks st "alice")))
+        "sorted by height rather than by whatever order the index yields")))
+
+(deftest the-evidence-is-covered-by-the-state-root
+  (testing "two chains with the SAME refusal tally and DIFFERENT evidence must
+            not agree — otherwise the record would be outside what is hashed"
+    (let [blocks (store)
+          m (fn [] (state/machine
+                    {:decode-block :ops
+                     :put! (fn [cid bytes] (swap! blocks assoc cid bytes))
+                     :get-fn (fn [cid] (get @blocks cid))
+                     :blind-fn blind :encrypt-fn crypt
+                     :authority {} :height-fn :height}))
+          root (fn [fork-entry]
+                 ((:root-fn (m))
+                  (reduce (:apply-fn (m)) ((:init-fn (m)))
+                          [{:height 1 :ops [{:op :actor-advance :address "alice" :caller "alice"
+                                             :seq 0 :prev-entry nil :entry (entry-cid 0)}]}
+                           {:height 2 :ops [{:op :actor-advance :address "alice" :caller "alice"
+                                             :seq 1 :prev-entry (entry-cid 4) :entry fork-entry}]}])))
+          rs [(root (entry-cid 8)) (root (entry-cid 9))]
+          check (fn [[a b]] (is (not= a b)))]
+      #?(:clj (check rs)
+         :cljs (async done (-> (js/Promise.all (clj->js rs))
+                               (.then (fn [cids] (check (vec cids)) (done)))))))))
+
+(deftest a-fork-refused-without-a-height-fn-does-not-throw
+  (testing "an advance can be refused on its own terms, and :height-fn is only
+            REQUIRED by :authority and :invoke-fn — a replica that threw here
+            would leave the protocol over adversarial input"
+    (let [blocks (store)
+          m (state/machine {:decode-block :ops
+                            :put! (fn [cid bytes] (swap! blocks assoc cid bytes))
+                            :get-fn (fn [cid] (get @blocks cid))
+                            :blind-fn blind :encrypt-fn crypt})
+          st (reduce (:apply-fn m) ((:init-fn m))
+                     [{:height 1 :ops [{:op :actor-advance :address "alice"
+                                        :seq 0 :prev-entry nil :entry (entry-cid 0)}]}
+                      {:height 2 :ops [{:op :actor-advance :address "alice"
+                                        :seq 1 :prev-entry (entry-cid 4) :entry (entry-cid 9)}]}])]
+      (is (= (entry-cid 0) (:entry (chain/head (state/actors st) "alice")))
+          "the fork is still refused")
+      (is (= [] (chain/forks st "alice"))
+          "and nothing is recorded, identically on every replica — the record is
+           what is lost, not the agreement"))))
 
 (deftest a-skipped-link-is-refused
   (let [entries (atom {"p0" {:author "alice" :seq 0 :prev nil :entry (entry-cid 0)}
