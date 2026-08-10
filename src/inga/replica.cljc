@@ -395,6 +395,29 @@
   one; and `resume` restores a view from a snapshot, so a restarted replica
   would re-enter a view whose leader has moved on.
 
+  ## The constraint both experiments found: leadership must be keyed by state
+  ## every replica agrees on EXACTLY, not eventually
+
+  A second attempt keyed leadership by `(+ h view)` — the classic round
+  number, and an apparently safe one because `sync-view` makes the view
+  converge and the height is the tip. It is better and still wrong:
+  **21 failures and 1 error**, with the chain again not reaching height one.
+
+  The reason is the difference between the two quantities. **Height is agreed
+  exactly**: it is read off a committed chain every replica holds the same
+  prefix of. **The view is agreed eventually**: `sync-view` pulls drifted
+  replicas up to it, `on-progress` bumps it when a QC arrives, and between
+  those moments two correct replicas can hold different views for perfectly
+  legitimate reasons. Leadership computed from eventually-agreed state means
+  two replicas disagree about who may propose — so either nobody proposes or
+  two do, and both are indistinguishable from the stall this was meant to fix.
+
+  So a real fix cannot read the round out of local pacemaker state at all. The
+  round has to become part of what the quorum certifies — carried in the block
+  and in the QC, so that agreeing on the chain IS agreeing on the round —
+  which is a wire-format change and a `resume` change, not a change to this
+  function.
+
   So: height, with a stated fault-tolerance gap, over view with a measured
   liveness failure. Choosing the running one is not the same as thinking it is
   correct — and `inga.departure-test/stalls-when-the-height-leader-departs`
