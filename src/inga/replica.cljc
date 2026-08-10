@@ -353,6 +353,20 @@
 
 ;; ── proposing ───────────────────────────────────────────────────────────────
 
+(defn- round-after
+  "The round a proposal extending `justify` is entitled to.
+
+  One past the round that certified the parent. This is the whole reason the
+  round can be checked at all: `justify` is a quorum certificate, so every
+  replica holding the block holds the same one and derives the same number —
+  **exactly agreed, not eventually agreed** (superproject ADR-2608680000).
+  The local view is not consulted and must not be.
+
+  Skipping further ahead is what a departed leader requires and needs a
+  timeout certificate to justify; it is refused until that is carried."
+  [justify]
+  (inc (:inga.qc/view justify -1)))
+
 (defn- my-turn?
   "Whose turn it is, keyed by HEIGHT.
 
@@ -422,8 +436,8 @@
   liveness failure. Choosing the running one is not the same as thinking it is
   correct — and `inga.departure-test/stalls-when-the-height-leader-departs`
   now pins the gap as an executable fact rather than a paragraph."
-  [state h]
-  (= (:witness state) (c/leader-for (:witnesses state) h)))
+  [state round]
+  (= (:witness state) (c/leader-for (:witnesses state) round)))
 
 (defn- propose
   "Build the next block on the tip, if this replica leads that height and
@@ -439,11 +453,12 @@
         parent-hash ((:hash-fn state) t)
         justify (get (:qcs state) parent-hash)]
     (if (and justify
-             (my-turn? state h)
+             (my-turn? state (round-after justify))
              (>= now (+ (:last-proposed-at state) (:block-interval (:params state)))))
       (let [b (c/make-block {:height h :parent-hash parent-hash
                              :proposals (:pending state)
                              :proposer (:witness state)
+                             :round (round-after justify)
                              ;; From the parent, not from the clock. See the
                              ;; namespace docstring: a block that depends on
                              ;; when it was built is a block a restart cannot
@@ -520,8 +535,15 @@
       ;; holds its turn and now nobody may take it. Refusing the wrong
       ;; proposer is still right — a protocol that votes for whoever asks has
       ;; no leader at all — and the gap belongs to the key, not to here.
+      ;; The round the block CLAIMS has to be the one its own certificate
+      ;; entitles it to. Checking the claim against the block's justify rather
+      ;; than against this replica's view is what makes the answer the same
+      ;; everywhere (ADR-2608680000 D1).
+      (not= (:inga.block/round block) (round-after (:inga.block/justify block)))
+      [(note-proposal state block :round-not-entitled) []]
+
       (not= (wire/wire-id (:inga.block/proposer block))
-            (wire/wire-id (c/leader-for (:witnesses state) h)))
+            (wire/wire-id (c/leader-for (:witnesses state) (:inga.block/round block))))
       [(note-proposal state block :not-the-leader) []]
 
       ;; Already voted at this height. Re-send the vote rather than saying
