@@ -370,10 +370,35 @@
   replicas happen to time out into the same view. They do not, reliably; each
   ends up the leader of its own view and nobody is the leader of the chain.
 
-  So: height, with a stated fault-tolerance gap, over view with a stated
-  liveness failure. The fix is view synchronisation that actually converges,
-  and it is not written. Choosing the running one is not the same as thinking
-  it is correct."
+  ## Re-verified 2026-08-10, and one sentence above was already wrong
+
+  **View synchronisation IS written.** `sync-view` jumps to a higher view when
+  f+1 distinct witnesses are at or past it, counted across every view at or
+  above the candidate rather than only messages naming it exactly — which is
+  the drift this paragraph used to say had no answer. Measured on a seven
+  process devnet: after a witness departs, all six survivors sit on the SAME
+  view and rotate leadership through it correctly. Views converge.
+
+  So the remaining gap is not convergence. It is that everything around this
+  function assumes the height key. Swapping the body for
+  `(pm/leader-for-view (:witnesses state) (:view (:pm state)))` and changing
+  nothing else takes the suite from 0 failures to **44 failures and 1 error
+  across 20 tests** — including `a-block-is-proposed-voted-certified-and-
+  committed`, so the chain does not reach height one, exactly as this
+  paragraph warned. The cheap fix is closed off; it was tried again against
+  the code as it stands today, not as it stood when this was written.
+
+  What a real change has to answer, and this note does not: a view produces at
+  most one block, so height and view have to advance together or the leader of
+  a view has nothing to propose; `propose` asks `my-turn?` for the height it
+  is about to build, and a view-keyed answer makes that question the wrong
+  one; and `resume` restores a view from a snapshot, so a restarted replica
+  would re-enter a view whose leader has moved on.
+
+  So: height, with a stated fault-tolerance gap, over view with a measured
+  liveness failure. Choosing the running one is not the same as thinking it is
+  correct — and `inga.departure-test/stalls-when-the-height-leader-departs`
+  now pins the gap as an executable fact rather than a paragraph."
   [state h]
   (= (:witness state) (c/leader-for (:witnesses state) h)))
 
