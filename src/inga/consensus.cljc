@@ -255,12 +255,60 @@
 
 ;; ── leader rotation ──────────────────────────────────────────────────────────
 
+(defn- id
+  "A witness identifier, normalised the way `inga.wire/wire-id` normalises it.
+
+  Duplicated rather than required because this namespace has no dependencies
+  and that is worth keeping. The two must agree: a check that compares `:w1`
+  against `\"w1\"` refuses every honest block, which is what happened the first
+  time this comparison was written with `str`."
+  [x]
+  (if (keyword? x) (subs (str x) 1) (str x)))
+
+(defn entitled-round
+  "The round a block extending `justify` may claim: one past the round that
+  certified its parent.
+
+  `justify` is a quorum certificate, so every replica holding the block
+  derives the SAME number — exactly agreed rather than eventually agreed,
+  which is the property superproject ADR-2608680000 turns on. No local view
+  is consulted."
+  [justify]
+  (inc (:inga.qc/view justify -1)))
+
 (defn leader-for
   "v1 leader election: plain round-robin over `witnesses` (a vector of
-  witness ids) keyed by height. Deliberately simple and PREDICTABLE — an
+  witness ids) keyed by a ROUND.
+
+  It was keyed by height, and the argument is still just a number — what
+  changed is which number callers pass. `proposed-by-its-leader?` derives it
+  from the block's own certificate so that a departed leader's turn moves on
+  (superproject ADR-2608680000); passing a height here again would restore the
+  fault-tolerance gap without changing a line of this function. Deliberately simple and PREDICTABLE — an
   adaptive adversary that knows the schedule could target the upcoming
   leader. ADR-2607993000 names this an intentional v1 simplification;
   hardening to VRF-based unpredictable election is deferred until a real
   adversarial (non-single-operator) validator set exists."
   [witnesses height]
   (nth witnesses (mod height (count witnesses))))
+
+(defn proposed-by-its-leader?
+  "Whether `block` carries the round its own certificate entitles it to, AND
+  was proposed by the witness that leads that round.
+
+  ## One rule, one place
+
+  This existed twice — in `inga.replica/handle-proposal` and in
+  `inga.sync/validate-segment` — both keyed by height. Moving the replica's
+  copy to the round and leaving sync's behind made a lagging replica refuse
+  every catch-up segment as `:wrong-proposer`, so it never healed: measured as
+  *the replica left behind at 28 never caught up to 33*. Two copies of a rule
+  is one copy that will be updated.
+
+  Callers pass the block as it reaches them, so both entry points — a live
+  proposal and a segment from a peer — answer identically."
+  [witnesses block]
+  (and (= (:inga.block/round block)
+          (entitled-round (:inga.block/justify block)))
+       (= (id (:inga.block/proposer block))
+          (id (leader-for witnesses (:inga.block/round block))))))

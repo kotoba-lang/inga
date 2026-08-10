@@ -187,10 +187,11 @@
             ;; makes those ":w1" and "w1" — so the check refused EVERY
             ;; segment, including the genuine ones, which looks exactly like
             ;; a fix when the thing you are measuring is a forgery getting in.
-            (and witnesses
-                 (not= (wire/wire-id (:inga.block/proposer b))
-                       (wire/wire-id (c/leader-for witnesses
-                                                   (:inga.block/height b)))))
+            ;; The SAME predicate the live proposal path uses. Keyed by the
+            ;; round the block carries, not by its height — see
+            ;; `inga.consensus/proposed-by-its-leader?` for what it cost to
+            ;; have this written twice.
+            (and witnesses (not (c/proposed-by-its-leader? witnesses b)))
             :wrong-proposer
             :else (recur b more))))))))
 

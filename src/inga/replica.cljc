@@ -365,7 +365,7 @@
   Skipping further ahead is what a departed leader requires and needs a
   timeout certificate to justify; it is refused until that is carried."
   [justify]
-  (inc (:inga.qc/view justify -1)))
+  (c/entitled-round justify))
 
 (defn- my-turn?
   "Whose turn it is, keyed by HEIGHT.
@@ -539,11 +539,7 @@
       ;; entitles it to. Checking the claim against the block's justify rather
       ;; than against this replica's view is what makes the answer the same
       ;; everywhere (ADR-2608680000 D1).
-      (not= (:inga.block/round block) (round-after (:inga.block/justify block)))
-      [(note-proposal state block :round-not-entitled) []]
-
-      (not= (wire/wire-id (:inga.block/proposer block))
-            (wire/wire-id (c/leader-for (:witnesses state) (:inga.block/round block))))
+      (not (c/proposed-by-its-leader? (:witnesses state) block))
       [(note-proposal state block :not-the-leader) []]
 
       ;; Already voted at this height. Re-send the vote rather than saying
