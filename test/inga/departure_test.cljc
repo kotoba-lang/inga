@@ -11,17 +11,13 @@
   four, not tolerating one failure in four.* This namespace turns that
   paragraph into something that runs.
 
-  ## These tests pin the CURRENT behaviour, which is the wrong behaviour
+  ## The gap these were written for is closed
 
-  `stalls-when-the-height-leader-departs` asserts a STALL. It is a
-  characterisation test, not a specification: the day someone lands view-keyed
-  leadership with view synchronisation that converges, it will fail, and that
-  failure is the point — it is the notification that the gap closed, and
-  whoever closes it should delete this test rather than adjust it.
-
-  The other two are real specifications and must keep passing either way: a
-  departure that is NOT the next height's leader must not stop the chain, and
-  a stall must never cost safety."
+  The first version of this namespace pinned a STALL as a characterisation
+  test, because a leader that departed held its turn forever. It said to
+  delete it rather than adjust it when the gap closed. It is deleted, and
+  `survives-the-departure-of-the-witness-due-to-lead` says the opposite in
+  its place."
   (:require [clojure.test :refer [deftest is testing]]
             [inga.replica :as r]
             [inga.consensus :as c]))
@@ -67,6 +63,17 @@
         [rs' _] (deliver-all rs ob t max-steps gone)]
     rs'))
 
+(def ^:private step
+  "Milliseconds between ticks.
+
+  Bigger than `inga.pacemaker/default-params`' base timeout, because a clock
+  that never reaches the deadline never times a view out — and a network that
+  never times out cannot route around anything. The first version of this
+  namespace ticked one millisecond at a time and therefore measured a stall
+  that no amount of correct leadership could have fixed: `pm-view` sat equal
+  to the tip's round and NOT ONE new-view was ever sent."
+  3000)
+
 (defn- boot
   "Start the chain and let it settle with everyone present."
   []
@@ -75,7 +82,7 @@
         [s0 out] (r/start (get rs leader) 1000)
         rs (assoc rs leader s0)
         [rs _] (deliver-all rs (mapv #(assoc % :from leader) out) 1000 4000 #{})]
-    (reduce #(tick-all %1 %2 #{} 4000) rs (range 1100 1140))))
+    (reduce #(tick-all %1 %2 #{} 4000) rs (range 1100 (+ 1100 (* 40 step)) step))))
 
 (defn- heights [rs gone]
   (->> (sort (keys rs)) (remove gone) (map #(r/height (get rs %))) vec))
@@ -87,22 +94,38 @@
       (is (every? pos? hs) (str "the chain must be running before anything is removed: " hs))
       (is (= 1 (count (set hs))) (str "and everyone must agree: " hs)))))
 
-(deftest stalls-when-the-height-leader-departs
-  (testing "CHARACTERISATION — pins the documented gap, and must fail when it closes"
+(deftest survives-the-departure-of-the-witness-due-to-lead
+  (testing "the chain routes around a leader that is gone — the gap this closed"
+    ;; This replaced a CHARACTERISATION test that asserted the opposite. That
+    ;; test existed because `my-turn?` was keyed by height, so a dead leader
+    ;; held its turn forever and no other replica could take it — *a protocol
+    ;; that tolerates one failure in four, not tolerating one failure in
+    ;; four*, in its own docstring's words. It said to delete it when the gap
+    ;; closed rather than adjust it, and this is that.
+    ;;
+    ;; What closed it: the round is carried in the block and validated against
+    ;; the parent, and a proposer may claim a HIGHER round when it holds a
+    ;; quorum of new-views for the one below — evidence that the intervening
+    ;; leaders produced nothing. Superproject ADR-2608680000.
     (let [rs (boot)
           h (apply max (heights rs #{}))
-          ;; the witness whose turn is the NEXT height, by the key `my-turn?`
-          ;; actually uses
           victim (c/leader-for witnesses (inc h))
           gone #{victim}
-          rs' (reduce #(tick-all %1 %2 gone 4000) rs (range 1200 1320))
+          rs' (reduce #(tick-all %1 %2 gone 4000)
+                      rs (range 200000 (+ 200000 (* 60 step)) step))
           hs (heights rs' gone)]
-      (is (= [h] (distinct hs))
-          (str "height " h " is led by " victim ", which is gone — with leadership "
-               "keyed by height the turn never moves, so the chain cannot pass it. "
-               "If this FAILS, view-keyed leadership landed: delete this test. Got " hs))
+      (is (> (apply max hs) h)
+          (str "height " h " was led by " victim ", which is gone. With the round "
+               "carried and skips justified, the survivors move on. Got " hs))
       (is (<= 5 (count (remove gone witnesses)))
-          "and it stalls with a quorum still present, which is what makes it a defect"))))
+          "and a quorum was present throughout — this was never a quorum problem")
+      (testing "and the rounds skipped past the departed leader are visible"
+        (let [tip-round (->> (remove gone witnesses)
+                             (map #(:inga.block/round (r/tip (get rs' %))))
+                             (apply max))]
+          (is (> tip-round (apply max hs))
+              (str "a chain that never skipped a round would have round = height; "
+                   "got round " tip-round " at height " (apply max hs))))))))
 
 (deftest survives-a-departure-that-is-not-the-next-leader
   (testing "SPECIFICATION — losing a non-leading witness must not stop the chain"
@@ -112,7 +135,7 @@
           ;; someone who is not due to lead the next height
           victim (first (remove #{next-leader} witnesses))
           gone #{victim}
-          rs' (reduce #(tick-all %1 %2 gone 4000) rs (range 1200 1260))
+          rs' (reduce #(tick-all %1 %2 gone 4000) rs (range 200000 (+ 200000 (* 30 step)) step))
           hs (heights rs' gone)]
       (is (> (apply max hs) h)
           (str "the chain must advance past " h " with " victim " gone "
@@ -124,7 +147,7 @@
     (let [rs (boot)
           h (apply max (heights rs #{}))
           gone #{(c/leader-for witnesses (inc h))}
-          rs' (reduce #(tick-all %1 %2 gone 4000) rs (range 1200 1320))
+          rs' (reduce #(tick-all %1 %2 gone 4000) rs (range 200000 (+ 200000 (* 60 step)) step))
           committed (->> (sort (keys rs')) (remove gone)
                          (map #(mapv (fn [b] ((:hash-fn (get rs' %)) b))
                                      (:committed (get rs' %)))))]

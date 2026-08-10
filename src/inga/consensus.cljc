@@ -303,23 +303,41 @@
   [witnesses height]
   (nth witnesses (mod height (count witnesses))))
 
+(defn led-by
+  "The witness entitled to propose at `round`."
+  [witnesses round]
+  (leader-for witnesses round))
+
 (defn proposed-by-its-leader?
-  "Whether `block` carries the round `parent` entitles it to, AND was proposed
-  by the witness that leads that round.
+  "Whether `block` was proposed by the witness that leads the round it
+  carries, and whether that round is one it may claim over `parent`.
+
+  ## Two entitlements, and only one of them is free
+
+  `parent.round + 1` needs nothing: the parent's round is carried in the
+  parent, so every replica derives the same next one.
+
+  Anything HIGHER is a skip — the case a departed leader creates — and is
+  only entitled if the intervening rounds actually failed. This function
+  cannot see that, so it takes `skip-ok?`: a predicate the caller supplies,
+  answering whether it holds a quorum of new-views for `(dec round)`. A live
+  proposal is checked against the receiver's own evidence; a block that
+  arrives already certified is not checked here at all, because the quorum
+  that certified it ran this check live and a certificate is that check's
+  record.
 
   ## One rule, one place
 
   This existed twice — in `inga.replica/handle-proposal` and in
-  `inga.sync/validate-segment` — both keyed by height. Moving the replica's
-  copy and leaving sync's behind made a lagging replica refuse every catch-up
-  segment as `:wrong-proposer`, so it never healed: measured as *the replica
-  left behind at 28 never caught up to 33*. Two copies of a rule is one copy
-  that will be updated.
-
-  Callers pass the block as it reaches them together with the parent they
-  checked it against, so both entry points — a live proposal and a segment
-  from a peer — answer identically."
-  [witnesses parent block]
-  (and (= (:inga.block/round block) (entitled-round parent))
-       (= (id (:inga.block/proposer block))
-          (id (leader-for witnesses (:inga.block/round block))))))
+  `inga.sync/validate-segment` — both keyed by height. Moving one and leaving
+  the other made a lagging replica refuse every catch-up segment as
+  `:wrong-proposer`, so it never healed: measured as *the replica left behind
+  at 28 never caught up to 33*. Two copies of a rule is one copy that will be
+  updated."
+  ([witnesses parent block] (proposed-by-its-leader? witnesses parent block (constantly false)))
+  ([witnesses parent block skip-ok?]
+   (let [r (:inga.block/round block)
+         base (entitled-round parent)]
+     (and (integer? r)
+          (or (= r base) (and (> r base) (skip-ok? r)))
+          (= (id (:inga.block/proposer block)) (id (leader-for witnesses r)))))))

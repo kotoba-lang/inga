@@ -353,6 +353,23 @@
 
 ;; ── proposing ───────────────────────────────────────────────────────────────
 
+(defn- can-justify-skip?
+  "Whether this replica has seen, itself, that round `(dec round)` failed:
+  a quorum of new-views for it.
+
+  The evidence is not carried in the block. It does not have to be — a block
+  that reaches a replica with a certificate was already checked by the quorum
+  that certified it, and one that arrives as a live proposal is checked
+  against evidence the proposer broadcast to everyone including this replica.
+  A replica that has not yet seen the new-views refuses, and the proposer
+  re-proposes; the retransmission path already exists because a lost vote
+  needed it. That costs a round trip in the worst case and keeps a fabricated
+  timeout certificate out of the block format entirely."
+  [state round]
+  (fn [_]
+    (boolean (pm/timeout-certificate (vec (vals (get-in state [:new-views (dec round)])))
+                                     (:quorum state)))))
+
 (defn- round-after
   "The round a proposal extending `justify` is entitled to.
 
@@ -444,6 +461,24 @@
   [state round]
   (= (:witness state) (c/leader-for (:witnesses state) round)))
 
+(defn- proposable-round
+  "The highest round this replica may claim over `parent`.
+
+  `parent.round + 1` always. Higher only when the pacemaker has moved past it
+  AND this replica holds a quorum of new-views for the round below — which is
+  the evidence that the intervening leaders did not produce a block.
+
+  **This is the half that closes the fault-tolerance gap.** Accepting a
+  skipped round (see `proposed-by-its-leader?`) does nothing on its own if no
+  proposer ever claims one: leadership would still sit on the round a
+  departed witness leads, which is the stall `departure-test` pins."
+  [state parent]
+  (let [base (round-after parent)
+        reached (:view (:pm state) base)]
+    (if (and (> reached base) ((can-justify-skip? state reached) reached))
+      reached
+      base)))
+
 (defn- propose
   "Build the next block on the tip, if this replica leads that height and
   holds a certificate for the tip. Returns `[state' outbox]`.
@@ -458,12 +493,12 @@
         parent-hash ((:hash-fn state) t)
         justify (get (:qcs state) parent-hash)]
     (if (and justify
-             (my-turn? state (round-after t))
+             (my-turn? state (proposable-round state t))
              (>= now (+ (:last-proposed-at state) (:block-interval (:params state)))))
       (let [b (c/make-block {:height h :parent-hash parent-hash
                              :proposals (:pending state)
                              :proposer (:witness state)
-                             :round (round-after t)
+                             :round (proposable-round state t)
                              ;; From the parent, not from the clock. See the
                              ;; namespace docstring: a block that depends on
                              ;; when it was built is a block a restart cannot
@@ -544,7 +579,8 @@
       ;; entitles it to. Checking the claim against the block's justify rather
       ;; than against this replica's view is what makes the answer the same
       ;; everywhere (ADR-2608680000 D1).
-      (not (c/proposed-by-its-leader? (:witnesses state) parent block))
+      (not (c/proposed-by-its-leader? (:witnesses state) parent block
+                                      (can-justify-skip? state (:inga.block/round block))))
       [(note-proposal state block :not-the-leader) []]
 
       ;; Already voted at this height. Re-send the vote rather than saying
