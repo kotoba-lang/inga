@@ -59,17 +59,28 @@
   transport-side signing were modelled first and neither changed the outcome;
   this is the last structural difference between here and the deployment.
 
-  It reproduces the deployed stall, and the threshold is brutally low:
+  ## Re-measured 2026-08-10 — the cliff is gone
 
-      NET_DELAY=  0   94 committed blocks
-      NET_DELAY=  5   21
-      NET_DELAY= 20    0
-      NET_DELAY= 60    0
+      NET_DELAY=   0   111 committed blocks   pass
+      NET_DELAY=   5   166                    pass
+      NET_DELAY=  20   114                    pass
+      NET_DELAY=  60    43                    pass
+      NET_DELAY= 200    13                    pass
 
-  An HTTP round trip between Durable Objects is tens of milliseconds at best,
-  so the deployment has never been anywhere near the range this implementation
-  survives. Zero is not a realistic setting for anything; it is the setting
-  under which the harness has been passing all along."
+  Throughput falls with delay, which it must: this is a round-trip-bound
+  protocol and every block costs one. **Safety and liveness hold throughout**
+  — all replicas agree, every forgery is refused and the equivocator is caught
+  at 200ms, which covers a LAN, a tailnet and a cross-region WAN.
+
+  This paragraph previously read *the threshold is brutally low* and recorded
+  0 committed blocks at 20ms and above. That was true when it was written and
+  is not true now, and leaving it would have decided a live question the wrong
+  way: it says, to anyone reading, that replicas cannot be deployed as
+  separate hosts over a real network — which is exactly the deployment shape
+  being moved to, and it is fine. **A stale measurement is worse than no
+  measurement, because it is quoted with confidence.** Re-run the table before
+  citing it; the numbers are one command away and this note is what a reader
+  gets instead of that command."
   (js/parseInt (or (some-> js/process .-env .-NET_DELAY) "0") 10))
 (def chain-id "engi-devnet-1")
 
