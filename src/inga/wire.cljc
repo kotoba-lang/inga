@@ -152,6 +152,12 @@
    "proposals" (vec (:inga.block/proposals b))
    "proposer" (wire-id (:inga.block/proposer b))
    "ts" (:inga.block/ts b)
+   ;; The round is IN the canonical block, so a block that crosses the wire
+   ;; without it hashes differently on arrival and every remote block is
+   ;; refused — with a green unit suite, because a fold never serialises.
+   ;; `wire-carries-every-field-the-hash-covers` is the check that this list
+   ;; and `inga.consensus/canonical-block` cannot drift apart again.
+   "round" (:inga.block/round b)
    "justify" (enc-qc (:inga.block/justify b))})
 
 (defn- dec-block [m limits]
@@ -166,6 +172,7 @@
                  (every? #(str-ok? % limits) ps)
                  (str-ok? (get m "proposer") limits)
                  (nat? (get m "ts"))
+                 (nat? (get m "round"))
                  ;; a justify that was present but did not decode is a
                  ;; malformed block, not a block without one — genesis is the
                  ;; only block allowed no certificate
@@ -175,6 +182,7 @@
          :inga.block/proposals ps
          :inga.block/proposer (get m "proposer")
          :inga.block/ts (get m "ts")
+         :inga.block/round (get m "round")
          :inga.block/justify justify}))))
 
 ;; ── encode ──────────────────────────────────────────────────────────────────

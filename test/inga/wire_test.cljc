@@ -15,6 +15,10 @@
    :inga.block/proposals ["cid-a" "cid-b"]
    :inga.block/proposer "w1"
    :inga.block/ts 50
+   ;; A block without a round has no checkable leadership claim, so `dec-block`
+   ;; refuses it (ADR-2608680000 D1). These fixtures build blocks by hand
+   ;; rather than through `make-block`, so the field has to be here too.
+   :inga.block/round 8
    :inga.block/justify (qc)})
 
 ;; ── round trips ─────────────────────────────────────────────────────────────
@@ -116,10 +120,10 @@
     (let [h (fn [b] (str "H" (:inga.block/height b)))
           parent {:inga.block/height 4 :inga.block/parent-hash "H3"
                   :inga.block/proposals [] :inga.block/proposer "w1"
-                  :inga.block/ts 40 :inga.block/justify nil}
+                  :inga.block/ts 40 :inga.block/round 0 :inga.block/justify nil}
           child {:inga.block/height 5 :inga.block/parent-hash "H4"
                  :inga.block/proposals [] :inga.block/proposer "w1"
-                 :inga.block/ts 50
+                 :inga.block/ts 50 :inga.block/round 1
                  :inga.block/justify {:inga.qc/block-hash "H4" :inga.qc/height 4
                                       :inga.qc/witnesses #{"w1" "w2" "w3"}
                                       :inga.qc/vote-count 3}}
@@ -212,3 +216,32 @@
                                      :from 4 :to 9})
                           w/default-limits)]
     (is (some? err) "an unbounded witness was accepted as a destination")))
+
+(deftest wire-carries-every-field-the-hash-covers
+  (testing "a field in the canonical block that the wire drops is a chain that splits"
+    ;; `enc-block` and `inga.consensus/canonical-block` are two hand-written
+    ;; lists of the same fields, and they drifted the moment one was extended:
+    ;; adding `:inga.block/round` to the hash without adding it to the wire
+    ;; left the whole unit suite green while every block crossing a socket
+    ;; hashed differently on arrival. The failure has no error and no log —
+    ;; remote proposals simply stop being adopted.
+    ;;
+    ;; Rather than compare the two source lists, this changes each field and
+    ;; asks the wire whether the change survived. A field the wire drops
+    ;; round-trips to the SAME hash as the original, and that is the bug.
+    (let [b (block)
+          h #(c/canonical-block %)
+          through #(:block (first (w/decode (w/encode {:type :proposal :block %}))))]
+      (is (= (h b) (h (through b))) "the unmodified block must survive unchanged")
+      (doseq [[k v] {:inga.block/height 99
+                     :inga.block/parent-hash "different"
+                     :inga.block/proposals ["other"]
+                     :inga.block/proposer "w9"
+                     :inga.block/ts 999
+                     :inga.block/round 999}]
+        (let [changed (assoc b k v)]
+          (is (not= (h b) (h changed))
+              (str k " is in the hash — if this fails the field left canonical-block"))
+          (is (= (h changed) (h (through changed)))
+              (str k " changed the hash but did not survive the wire: enc-block "
+                   "and canonical-block have drifted")))))))
