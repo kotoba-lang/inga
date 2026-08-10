@@ -191,7 +191,7 @@
             ;; round the block carries, not by its height — see
             ;; `inga.consensus/proposed-by-its-leader?` for what it cost to
             ;; have this written twice.
-            (and witnesses (not (c/proposed-by-its-leader? witnesses b)))
+            (and witnesses (not (c/proposed-by-its-leader? witnesses prev b)))
             :wrong-proposer
             :else (recur b more))))))))
 

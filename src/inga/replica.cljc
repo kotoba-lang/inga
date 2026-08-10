@@ -363,9 +363,14 @@
   The local view is not consulted and must not be.
 
   Skipping further ahead is what a departed leader requires and needs a
-  timeout certificate to justify; it is refused until that is carried."
-  [justify]
-  (c/entitled-round justify))
+  timeout certificate to justify; it is refused until that is carried, so
+  **with no timeouts the round equals the height and leadership behaves
+  exactly as it did when it was keyed by height.** That is deliberate: this
+  step moves the key onto something carried and checkable without changing
+  what any healthy network does, and the fault-tolerance gap closes in the
+  step that adds the skip."
+  [parent]
+  (c/entitled-round parent))
 
 (defn- my-turn?
   "Whose turn it is, keyed by HEIGHT.
@@ -453,12 +458,12 @@
         parent-hash ((:hash-fn state) t)
         justify (get (:qcs state) parent-hash)]
     (if (and justify
-             (my-turn? state (round-after justify))
+             (my-turn? state (round-after t))
              (>= now (+ (:last-proposed-at state) (:block-interval (:params state)))))
       (let [b (c/make-block {:height h :parent-hash parent-hash
                              :proposals (:pending state)
                              :proposer (:witness state)
-                             :round (round-after justify)
+                             :round (round-after t)
                              ;; From the parent, not from the clock. See the
                              ;; namespace docstring: a block that depends on
                              ;; when it was built is a block a restart cannot
@@ -539,7 +544,7 @@
       ;; entitles it to. Checking the claim against the block's justify rather
       ;; than against this replica's view is what makes the answer the same
       ;; everywhere (ADR-2608680000 D1).
-      (not (c/proposed-by-its-leader? (:witnesses state) block))
+      (not (c/proposed-by-its-leader? (:witnesses state) parent block))
       [(note-proposal state block :not-the-leader) []]
 
       ;; Already voted at this height. Re-send the vote rather than saying

@@ -266,15 +266,26 @@
   (if (keyword? x) (subs (str x) 1) (str x)))
 
 (defn entitled-round
-  "The round a block extending `justify` may claim: one past the round that
-  certified its parent.
+  "The round a block extending `parent` may claim: one past the parent's own.
 
-  `justify` is a quorum certificate, so every replica holding the block
-  derives the SAME number — exactly agreed rather than eventually agreed,
-  which is the property superproject ADR-2608680000 turns on. No local view
-  is consulted."
-  [justify]
-  (inc (:inga.qc/view justify -1)))
+  ## Why the parent's round and not the certificate's view
+
+  The first version derived it from `justify`'s view, which is also exactly
+  agreed and is nevertheless wrong: a QC's view is the view its VOTES were
+  cast in, and that only moves when the pacemaker moves. Two consecutive
+  blocks therefore landed in the same round, so the same witness led both —
+  and, blocked by its own `block-interval`, proposed neither. Measured: every
+  replica voted at height one, reached it, and the network then went quiet
+  with nothing committed.
+
+  A parent's round is carried in the parent block, which is as exactly agreed
+  as its height and moves once per block by construction. With no timeouts the
+  round tracks the height exactly, so leadership rotates block by block just
+  as it did when it was keyed by height — and the ONLY difference is that a
+  round can be skipped when a leader does not produce one, which is the
+  fault-tolerance gap this whole change exists to close."
+  [parent]
+  (inc (:inga.block/round parent 0)))
 
 (defn leader-for
   "v1 leader election: plain round-robin over `witnesses` (a vector of
@@ -293,22 +304,22 @@
   (nth witnesses (mod height (count witnesses))))
 
 (defn proposed-by-its-leader?
-  "Whether `block` carries the round its own certificate entitles it to, AND
-  was proposed by the witness that leads that round.
+  "Whether `block` carries the round `parent` entitles it to, AND was proposed
+  by the witness that leads that round.
 
   ## One rule, one place
 
   This existed twice — in `inga.replica/handle-proposal` and in
   `inga.sync/validate-segment` — both keyed by height. Moving the replica's
-  copy to the round and leaving sync's behind made a lagging replica refuse
-  every catch-up segment as `:wrong-proposer`, so it never healed: measured as
-  *the replica left behind at 28 never caught up to 33*. Two copies of a rule
-  is one copy that will be updated.
+  copy and leaving sync's behind made a lagging replica refuse every catch-up
+  segment as `:wrong-proposer`, so it never healed: measured as *the replica
+  left behind at 28 never caught up to 33*. Two copies of a rule is one copy
+  that will be updated.
 
-  Callers pass the block as it reaches them, so both entry points — a live
-  proposal and a segment from a peer — answer identically."
-  [witnesses block]
-  (and (= (:inga.block/round block)
-          (entitled-round (:inga.block/justify block)))
+  Callers pass the block as it reaches them together with the parent they
+  checked it against, so both entry points — a live proposal and a segment
+  from a peer — answer identically."
+  [witnesses parent block]
+  (and (= (:inga.block/round block) (entitled-round parent))
        (= (id (:inga.block/proposer block))
           (id (leader-for witnesses (:inga.block/round block))))))
