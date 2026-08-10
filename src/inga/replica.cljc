@@ -849,43 +849,67 @@
                     (+ now (pm/timeout-for 0 (:params state)))))
       state)))
 
+(defn- new-view-refusal
+  "Why a new-view was not accepted, or nil if it was.
+
+  A refused new-view produced NO record at all — the same silence that
+  `note-proposal` exists to break for proposals, and the one this system's
+  stalls keep hiding in. Measured on testnet: `new-view-groups` sat at zero
+  while views advanced, which says every new-view was refused and says nothing
+  about why. Four hypotheses were ruled out one at a time before anyone could
+  ask the replica.
+
+  The reasons are separated rather than folded into one boolean, because
+  `:unsigned`, `:bad-signature` and `:bad-certificate` have three different
+  fixes and one of them is not a bug at all."
+  [state {:keys [witness view high-qc sig]}]
+  (let [verify (:verify-fn state)]
+    (cond
+      (nil? verify) nil                      ; replaying an agreed history
+      (nil? sig) :unsigned
+      (not (verify witness
+                   (att/new-view-payload (:chain-id state) view witness high-qc)
+                   sig))
+      :bad-signature
+
+      ;; The certificate it carries has to hold up on its own — a signed
+      ;; message asserting an unverified certificate moves the forgery one
+      ;; level in, it does not stop it.
+      ;;
+      ;; ...except at genesis. `start` fabricates a certificate for the
+      ;; genesis block so the first proposal has something to justify, and
+      ;; nobody signed it because nobody voted: genesis is the one block every
+      ;; replica has by construction. Requiring signatures on it refused every
+      ;; new-view whose high QC was still the bootstrap one, so replicas that
+      ;; had not yet certified anything could not tell each other they had
+      ;; timed out. Their views drifted apart, no two new-views shared a view,
+      ;; no timeout certificate could form, and four validators sat exchanging
+      ;; new-views forever at views 5, 6, 6, 6.
+      (and (some? high-qc)
+           (not (zero? (:inga.qc/height high-qc -1)))
+           (some? (att/verify-certificate high-qc (:chain-id state)
+                                          (:quorum state) verify
+                                          (wire/admits (:witnesses state)))))
+      :bad-certificate
+
+      :else nil)))
+
+(defn- note-new-view
+  "What happened to the last new-view, and why. The counterpart of
+  `note-proposal`, and added for the same reason: an outcome that produces no
+  message leaves nothing to read."
+  [state witness view outcome]
+  (assoc state :last-new-view {:witness witness :view view :outcome outcome}))
+
 (defn- handle-new-view
-  [state {:keys [witness view high-qc sig]} now]
+  [state {:keys [witness view high-qc sig] :as msg} now]
   (let [witness (wire/wire-id witness)
-        verify (:verify-fn state)
-        ok? (or (nil? verify)
-                (and sig
-                     (verify witness
-                             (att/new-view-payload (:chain-id state) view
-                                                   witness high-qc)
-                             sig)
-                     ;; and the certificate it carries has to hold up on its
-                     ;; own — a signed message asserting an unverified
-                     ;; certificate moves the forgery one level in, it does
-                     ;; not stop it
-                     (or (nil? high-qc)
-                         ;; ...except at genesis. `start` fabricates a
-                         ;; certificate for the genesis block so the first
-                         ;; proposal has something to justify, and nobody
-                         ;; signed it because nobody voted: genesis is the one
-                         ;; block every replica has by construction. Requiring
-                         ;; signatures on it refused every new-view whose high
-                         ;; QC was still the bootstrap one, so replicas that
-                         ;; had not yet certified anything could not tell each
-                         ;; other they had timed out. Their views drifted
-                         ;; apart, no two new-views shared a view, no timeout
-                         ;; certificate could form, and four validators sat
-                         ;; exchanging new-views forever at views 5, 6, 6, 6.
-                         ;;
-                         ;; It costs nothing: a certificate for height 0
-                         ;; carries no claim about anything that was decided.
-                         (zero? (:inga.qc/height high-qc -1))
-                         (nil? (att/verify-certificate high-qc (:chain-id state)
-                                                       (:quorum state) verify
-                                                       (wire/admits (:witnesses state)))))))]
+        refusal (new-view-refusal state (assoc msg :witness witness))
+        ok? (nil? refusal)]
     (if-not ok?
-      [state []]
-      (let [state (update-in state [:new-views view] (fnil assoc {}) witness
+      [(note-new-view state witness view refusal) []]
+      (let [state (note-new-view state witness view :accepted)
+            state (update-in state [:new-views view] (fnil assoc {}) witness
                              {:inga.nv/witness witness :inga.nv/view view
                               :inga.nv/high-qc high-qc})
             ;; KEEP the certificate. It arrived verified — the guard above ran

@@ -155,3 +155,38 @@
           "every surviving replica must hold the same committed prefix")
       (is (every? #(= (first committed) %) committed)
           "liveness may fail; agreement may not"))))
+
+(deftest a-refused-new-view-says-why
+  (testing "an outcome that produces no message must still leave a record"
+    ;; Measured on the Cloudflare testnet: `new-view-groups` sat at zero while
+    ;; views advanced — every new-view refused, and nothing anywhere saying
+    ;; which of three unrelated reasons it was. Four hypotheses were ruled out
+    ;; one at a time before anyone could ask the replica.
+    (let [s (r/replica {:witness :w1 :witnesses witnesses
+                        :quorum (c/quorum-size (count witnesses))
+                        :hash-fn hash-fn
+                        :chain-id "chain-a"
+                        ;; refuses everything, which is what an unknown key or
+                        ;; a mismatched chain-id looks like from in here
+                        :verify-fn (fn [_ _ _] false)})
+          [s' out] (r/on-message s {:type :new-view :witness :w2 :view 7
+                                    :high-qc nil :sig "sig"} 1000)]
+      (is (empty? out))
+      (is (= {:witness "w2" :view 7 :outcome :bad-signature} (:last-new-view s'))
+          "the refusal has to name itself"))
+    (testing "and an unsigned one is a different reason with a different fix"
+      (let [s (r/replica {:witness :w1 :witnesses witnesses
+                          :quorum (c/quorum-size (count witnesses))
+                          :hash-fn hash-fn :chain-id "chain-a"
+                          :verify-fn (fn [_ _ _] true)})
+            [s' _] (r/on-message s {:type :new-view :witness :w2 :view 7
+                                    :high-qc nil} 1000)]
+        (is (= :unsigned (:outcome (:last-new-view s'))))))
+    (testing "and an accepted one says so, so silence never means success"
+      (let [s (r/replica {:witness :w1 :witnesses witnesses
+                          :quorum (c/quorum-size (count witnesses))
+                          :hash-fn hash-fn :chain-id "chain-a"
+                          :verify-fn (fn [_ _ _] true)})
+            [s' _] (r/on-message s {:type :new-view :witness :w2 :view 7
+                                    :high-qc nil :sig "sig"} 1000)]
+        (is (= :accepted (:outcome (:last-new-view s'))))))))
