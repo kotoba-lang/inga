@@ -191,7 +191,17 @@
             ;; round the block carries, not by its height — see
             ;; `inga.consensus/proposed-by-its-leader?` for what it cost to
             ;; have this written twice.
-            (and witnesses (not (c/proposed-by-its-leader? witnesses prev b)))
+            ;; MONOTONE, not exact. A block in a segment carries a quorum
+            ;; certificate, and the quorum that produced it ran the strict
+            ;; entitlement check live — a certificate IS that check's record.
+            ;; Re-deriving it here would refuse every legitimately skipped
+            ;; round, which is exactly how a lagging replica stopped being
+            ;; able to catch up once leadership moved off the height.
+            (and witnesses
+                 (or (not (integer? (:inga.block/round b)))
+                     (<= (:inga.block/round b) (:inga.block/round prev -1))
+                     (not= (wire/wire-id (:inga.block/proposer b))
+                           (wire/wire-id (c/led-by witnesses (:inga.block/round b))))))
             :wrong-proposer
             :else (recur b more))))))))
 
