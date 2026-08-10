@@ -740,7 +740,11 @@
           (let [state (-> state
                           (assoc-in [:qcs block-hash] cert)
                           (update :pm pm/on-qc cert)
-                          (update :pm pm/on-progress cert now (:params state))
+                          ;; The certified block's round, not the QC's view —
+                          ;; the counter is anchored to the chain (ADR-2608680000).
+                          (update :pm pm/on-progress
+                                  (:inga.block/round (get (:by-hash state) block-hash) 0)
+                                  now (:params state))
                           absorb-commits)]
             (propose state now))
           [state []]))

@@ -202,13 +202,22 @@
         (assoc :deadline (+ now (timeout-for 0 params))))))
 
 (defn on-progress
-  "A view produced a certified block. The failure count resets, which is what
+  "A round produced a certified block. The failure count resets, which is what
   makes the backoff track CONSECUTIVE failures rather than total ones — a
-  chain that hiccups once an hour should not end up with hour-long views."
-  [state qc now params]
+  chain that hiccups once an hour should not end up with hour-long views.
+
+  ## Takes the certified block's ROUND, not the certificate's view
+
+  It used to read `(inc (qc-view qc))`, which derives a view from a view: the
+  QC's view is the view its VOTES were cast in, so the counter was anchored to
+  itself and only moved when the pacemaker moved. Anchoring it to
+  `:inga.block/round` — carried in the block the quorum certified — means
+  **agreeing on the chain is agreeing on the counter** (superproject
+  ADR-2608680000). The caller folds the QC separately; doing it here as well
+  was doing it twice."
+  [state round now params]
   (-> state
-      (on-qc qc)
-      (update :view max (inc (qc-view qc)))
+      (update :view max (inc round))
       (assoc :failures 0)
       (assoc :deadline (+ now (timeout-for 0 params)))))
 

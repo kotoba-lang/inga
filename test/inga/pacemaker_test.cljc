@@ -34,7 +34,7 @@
               (pm/on-timeout 0 1 params) first)]
     (is (= 2 (:failures s)))
     (testing "and a produced block resets it"
-      (let [s' (pm/on-progress s (qc 5 5 "b5") 0 params)]
+      (let [s' (pm/on-progress s 5 0 params)]
         (is (= 0 (:failures s')))
         (is (= 1000 (:deadline s'))
             "a chain that hiccups once an hour must not end up with hour-long views")))))
