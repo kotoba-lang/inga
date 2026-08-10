@@ -95,25 +95,48 @@
   style as `engi.core/canonical-entry` (plain string concatenation, no
   JSON/EDN printer dependency, byte-identical across JVM and cljs)."
   [{:keys [inga.block/height inga.block/parent-hash inga.block/proposals
-           inga.block/proposer inga.block/ts]}]
+           inga.block/proposer inga.block/ts inga.block/round]}]
   (str "engi/block\n"
        "height=" height "\n"
        "parent-hash=" parent-hash "\n"
        "proposals=" (apply str (interpose "," proposals)) "\n"
        "proposer=" proposer "\n"
-       "ts=" ts "\n"))
+       "ts=" ts "\n"
+       ;; The round is signed over, or a proposer could claim one round to the
+       ;; leadership check and a different one to everything else. Adding it
+       ;; changes every block hash, which is why ADR-2608680000 D3 resets the
+       ;; testnet chain rather than migrating it — the durable committed log
+       ;; is keyed by (ref, seq) and survives a chain reset untouched.
+       "round=" round "\n"))
 
 (defn make-block
   "Build a block. `justify` is the QC (see `qc`) certifying this block's
   immediate parent — nil only for the genesis block. `proposals` is a vector
   of TransferBody CIDs (engi.core/ADR-2607101100's existing proposal shape,
-  unchanged here)."
-  [{:keys [height parent-hash proposals proposer ts justify]}]
+  unchanged here).
+
+  `round` is the round this block was proposed IN, and it is here because
+  leadership has to be checkable by whoever receives the block rather than
+  computed from whatever view the receiver happens to be in. Superproject
+  ADR-2608680000: the height is agreed exactly and the view only eventually,
+  so a follower that computes `leader-for(my view)` and a proposer that
+  computed `leader-for(mine)` can disagree — and two correct replicas
+  disagreeing about who may propose is indistinguishable from the stall it
+  was meant to fix. Carried in the block, the input to that check arrives
+  with the thing being checked.
+
+  Defaults to `(inc (qc-view justify))` — the round after the one that
+  certified the parent — which is the only round a proposer is entitled to
+  without further evidence. Skipping rounds (the case a departed leader
+  creates) additionally needs a timeout certificate and is NOT yet accepted;
+  see `inga.replica/proposal-round-ok?`."
+  [{:keys [height parent-hash proposals proposer ts justify round]}]
   {:inga.block/height height
    :inga.block/parent-hash (or parent-hash "genesis")
    :inga.block/proposals (vec proposals)
    :inga.block/proposer proposer
    :inga.block/ts ts
+   :inga.block/round (or round (inc (:inga.qc/view justify -1)))
    :inga.block/justify justify})
 
 (defn make-vote
