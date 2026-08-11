@@ -1277,7 +1277,7 @@
               ask (when-not (= (:view (:pm state')) (:last-sync-ask state))
                     [{:to :all
                       :msg {:type :sync-request
-                            :witness (:id state')
+                            :witness (:witness state')
                             :from (inc (height state'))
                             ;; We do not know the target, so ask for a window
                             ;; above us. `handle-sync-request` answers with
