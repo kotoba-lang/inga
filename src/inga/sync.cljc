@@ -154,7 +154,15 @@
         (not= heights (range (first heights) (+ (first heights) (count blocks))))
         :non-contiguous
 
-        (not= (inc (:inga.block/height anchor)) (first heights))
+        ;; A nil anchor is a caller with no chain to attach to, and it used
+        ;; to `inc` nil and throw — a NullPointerException out of a validator
+        ;; whose entire job is to refuse things. It became reachable the
+        ;; moment sync answers started being ADDRESSED, because that is when
+        ;; a replica far enough behind first received a segment it might
+        ;; actually have used. Refusing is the same answer the rest of this
+        ;; function gives; crashing is not an answer.
+        (or (nil? anchor)
+            (not= (inc (:inga.block/height anchor)) (first heights)))
         :does-not-attach
 
         :else

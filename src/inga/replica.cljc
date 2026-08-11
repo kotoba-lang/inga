@@ -552,8 +552,17 @@
       ;; voting on a block whose parent this replica has never seen
       (nil? parent)
       [(note-proposal state block :no-parent)
+       ;; `(:witness state)`, not `(:id state)` — there is no `:id` key, so
+       ;; every sync-request this replica ever sent named NOBODY. The answer
+       ;; is broadcast when the asker is anonymous, and a replica far behind
+       ;; then receives mostly answers to OTHER replicas' questions, each
+       ;; starting at a height it cannot reach. `handle-sync-request`'s
+       ;; docstring describes this exact failure and says addressing is the
+       ;; fix; the addressing was never supplied. Measured: a wiped witness
+       ;; rejoining a running chain asked from height 1 and was offered a
+       ;; single block at 121, `:does-not-attach`, forever.
        [{:to :all :msg {:type :sync-request
-                              :witness (:id state)
+                              :witness (:witness state)
                               :from (inc (height state))
                               :to (:inga.block/height block)}}]]
 
@@ -956,7 +965,7 @@
                                              (:inga.qc/height high-qc)
                                              sync/default-params)]
                     [{:to :all :msg (assoc r :type :sync-request
-                                             :witness (:id state))}]))]
+                                             :witness (:witness state))}]))]
         (if-let [tc (pm/timeout-certificate (vec msgs) (:quorum state))]
           (let [state (update state :pm pm/on-timeout-certificate tc now (:params state))
                 [state out] (propose state now)]
