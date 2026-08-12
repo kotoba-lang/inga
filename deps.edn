@@ -6,8 +6,28 @@
 ;; and `engi.consensus` uses for `hash-fn`. That is what keeps the curve at
 ;; the edge (Workers already have @noble/curves) and this library portable.
 ;;
-;; The only dependency is the storage CONTRACT it implements. kotobase-storage
-;; is itself zero-dependency, so nothing transitive arrives with it.
+;; ## The runtime dependency set, and why it is closed
+;;
+;; This block used to say "the only dependency is the storage CONTRACT it
+;; implements", which stopped being true one line below it when `arrangement`
+;; arrived for F1 — and arrangement is not zero-dependency either (datalog,
+;; datom-source, io-ipld, prolly-tree, io-multiformats, org-ietf-cbor all come
+;; with it; `shadow-cljs.edn`'s generated source paths list them). So the
+;; posture is not "zero dependencies" and pretending otherwise would make the
+;; real rule unstateable. The real rule is narrower and it is about consensus:
+;;
+;;   **Nothing on which two replicas could disagree may enter this set.**
+;;
+;; Both entries pass. They are content-addressed data structures and a storage
+;; contract: given the same bytes they produce the same bytes, and a replica
+;; running a different pin of them produces a visibly different CID rather than
+;; a quietly different ANSWER.
+;;
+;; The thing this rule excludes is named because it was measured and declined,
+;; not because nobody thought of it: an INTERPRETER for the decision cores in
+;; `kotoba/`. See `test/inga/kotoba_reproducibility_test.clj` for the numbers
+;; and `README.md` ("What the Kotoba cores actually run") for the argument.
+;; `kotoba-kir` therefore does not appear here, and a test asserts it stays out.
 {:paths ["src"]
  :deps {io.github.kotoba-lang/kotobase-storage
         {:git/url "https://github.com/kotoba-lang/kotobase-storage.git"
@@ -23,8 +43,36 @@
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
-                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}
+                      ;; The compiler that BUILT `kotoba/*.wasm`, here and only
+                      ;; here. It is the producer, and a producer that can reach
+                      ;; a consumer is a consumer: nothing under `src/` may load
+                      ;; it, and nothing does.
+                      ;;
+                      ;; Pinned by inga rather than tracked from the fleet on
+                      ;; purpose. `kotoba-reproducibility-test` recompiles the
+                      ;; sources with THIS compiler and requires the bytes to
+                      ;; equal the checked-in binaries, so the pin is the
+                      ;; question the gate asks. Tracking the fleet pin would
+                      ;; turn it red every time somebody else advanced the
+                      ;; compiler — which is the objection ADR-2608120200 raises
+                      ;; against recompile gates in general, and it is avoided by
+                      ;; owning the pin, not by skipping the gate.
+                      ;;
+                      ;; Moving it is a real piece of work and not a version
+                      ;; bump: measured on `kotoba-lang/kura` 2026-08-12, the
+                      ;; compiler on `main` rejects sources these pins accept
+                      ;; (`string=?` returns `:bool` there and `:i64` here), so
+                      ;; advancing means migrating the cores and regenerating.
+                      io.github.kotoba-lang/compiler
+                      {:git/url "https://github.com/kotoba-lang/compiler.git"
+                       :git/sha "806f5cef7d5bc11ad8ec8514ad6121efc73be6c7"}}
          :main-opts ["-m" "cognitect.test-runner"]}
+  ;; Rebuild `kotoba/*.wasm` and their provenance records from `kotoba/*.kotoba`.
+  ;; Combine with :test, which is where the compiler lives:
+  ;;
+  ;;   clojure -M:test:gen
+  :gen {:main-opts ["-m" "inga.kotoba-wasm-gen"]}
   ;; One scenario, both runtimes, one digest. See inga.parity's docstring:
   ;; a JVM suite is not evidence about ClojureScript, and ClojureScript is
   ;; the runtime kotobase actually deploys on.

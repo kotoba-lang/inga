@@ -29,6 +29,28 @@
 ;; `stake-quorum-met?` reduces to a two-integer comparison the moment its two
 ;; sums exist. `total-stake` produces the sums; `stake-met` below decides.
 ;;
+;; ## This module is the reference. It is NOT what production executes.
+;;
+;; `inga.consensus` / `inga.quorum` / `inga.stake` decide; the cljs suite runs
+;; the checked-in `quorum.wasm` against them over a matrix. Superproject
+;; ADR-2608112100 calls that arrangement a first step and the workspace pattern
+;; is to finish it by having the host execute the shipped artifact. inga was
+;; measured against that standard and deliberately stopped here.
+;;
+;; The short version, because a reader of this file should not have to find the
+;; README to know whether it runs: a compiled module traps when its own fuel
+;; runs out (256 calls of `quorum-size` on one instance, measured), and
+;; exhaustion-as-a-trap is the one thing `inga.fuel` forbids; while delegating
+;; to a KIR interpreter would make the threshold a function of which
+;; interpreter pin a replica has, which is precisely the disagreement the
+;; paragraph above says costs a fork. README, 'What the Kotoba cores actually
+;; run', has the measurements.
+;;
+;; What that leaves is real and is the point: the numbers below are the
+;; reference, the cljc is the implementation, and if they ever disagree the
+;; answer here is the correct one. `inga.kotoba-reproducibility-test` keeps the
+;; checked-in binary equal to this source compiled.
+;;
 ;; ## Pure i64 by construction
 ;;
 ;; No capability is declared because none is needed. Every function here takes

@@ -13,6 +13,27 @@
 ;; state machine does not perform effects, and the compiler's deny-by-default
 ;; policy therefore has nothing to grant. `kotoba compile --target wasm32`
 ;; takes this as-is.
+;;
+;; ## This module is the reference. It is NOT what production executes.
+;;
+;; `inga.fuel/apply-metered` decides; the cljs suite runs the checked-in
+;; `fuel.wasm` against it over a matrix. Finishing the port the way the
+;; workspace pattern says (superproject ADR-2608112100: the host executes the
+;; shipped artifact) was measured and declined — see `quorum.kotoba`'s header
+;; and README, 'What the Kotoba cores actually run'.
+;;
+;; The reason lands hardest on THIS module, and it is one the file already
+;; contains. `fits` is a per-op decision, so a block of n ops asks it n times:
+;; 1.35 ms per call through a KIR interpreter makes a thousand-op block take
+;; longer than the round it belongs to, and a compiled instance exhausts its
+;; own fuel and traps at 42 calls of `applied` — which is the failure the
+;; namespace above this one exists to forbid. The delegation boundary in
+;; ADR-2608112100 asks whether the data grows with the domain; here the data is
+;; three scalars and it is the CALL RATE that grows.
+;;
+;; `applied` / `applied-from` / `spent` are conformance fixtures rather than a
+;; seam: the loop belongs in the cljc, because it is what calls `step` on host
+;; state. `fits` is the decision.
 
 ;; Does one more op at `cost` fit? 1 = yes, 0 = no.
 ;;

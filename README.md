@@ -198,6 +198,100 @@ premises are different claims. Do not describe deployments using this library
 as "distributed" or "decentralized" until independent third-party operators
 with economic exposure exist (that ADR's Phase 4).
 
+## What the Kotoba cores actually run
+
+**They do not run. The `.cljc` decides, and that is a measured choice.**
+
+`kotoba/fuel.kotoba` and `kotoba/quorum.kotoba` are the reference for the two
+numbers a replica cannot be alone in believing. They are compiled, checked in
+as `.wasm`, and compared against the live `.cljc` by the cljs suite. What they
+are *not* is the thing production calls.
+
+That is worth stating plainly because the workspace pattern is the opposite.
+Superproject ADR-2608112100 says a core with a parity test is not migrated —
+completion is the host executing the shipped artifact — and five cores in three
+repos have since moved that way. inga was measured against the same standard
+and did not move. The reasons are specific to consensus rather than to effort,
+so they are recorded here instead of left as an absence.
+
+### The two seams, measured 2026-08-12
+
+| | shipped `.wasm` | KIR interpreter |
+|---|---|---|
+| per call | native, but the instance **traps** | **1.35 ms** on node, 1.0–1.6 ms on JVM |
+| calls per instance | **256** (`quorum-size`), 42 (`fuel/applied`) | unbounded; fuel resets per call |
+| re-arming | 0.75 ms per fresh instantiation | n/a |
+| both runtimes | needs a host per runtime (Chicory on JVM) | portable `.cljc`, verified on both |
+| what a replica must share | the **bytes** | the **interpreter pin** |
+
+Neither column is an argument about elegance. Each has one entry that
+disqualifies it *here*.
+
+**The wasm traps.** A compiled module carries its own fuel and halts with
+`unreachable` when it runs out — 256 calls of `quorum-size` on one instance,
+measured. `inga.fuel`'s whole rule is that **exhaustion must be a value in the
+state, never a throw**, because a replica that throws has left the protocol
+while its peers produce a root. Delegating the quorum threshold to something
+that traps would put that exact failure on the path that decides whether a
+certificate forms. Re-instantiating around it means catching a trap and
+retrying, which is indistinguishable from catching a real error.
+
+**The interpreter makes the answer a function of a pin.** This is the sharper
+one, and it is not a dependency-count objection. `quorum.kotoba`'s own header
+states the stake: two implementations disagreeing means two replicas commit
+different state. Delegating to a versioned interpreter does not remove the
+second implementation — it replaces "inga's `.cljc` twin, which ships with inga
+at inga's own pin" with "whatever `kotoba-kir` each replica happens to have",
+and the substitute is worse in the way that matters: inga cannot see it, cannot
+hold every replica to it, and cannot test both its runtimes without shipping
+both. The hazard is not hypothetical. Measured on `kotoba-lang/kura` the same
+week, that interpreter's ClojureScript path threw where its JVM path did not,
+at pins the fleet was using — and ClojureScript is the runtime this library
+deploys on.
+
+A conflicting certificate at one height is the outcome the whole safety lemma
+exists to exclude. It is the one place a version-dependent answer cannot be
+tolerated, which is why the same delegation that is right for
+`kotoba-lang/crdt` — where a disagreement degrades an ordering and the
+primitives still converge — is wrong here.
+
+Two costs of *not* delegating, stated rather than left for a reader to find:
+
+- **The `.cljc` twin remains, and the parity suites remain load-bearing.** The
+  rules are written twice, and `inga.fuel-kotoba-test` / `inga.quorum-kotoba-test`
+  are what keep the two honest. That is the arrangement ADR-2608112100 calls a
+  first step, and here it is the last one.
+- **`.cljc` is not pin-free either** — `quot` on a JVM long and on a JS number
+  are different implementations. inga's answer to that is `inga.parity`: one
+  scenario, both runtimes, one digest. Delegation would not have removed that
+  problem, only moved it somewhere inga does not control.
+
+### What did change: the source is now the authority for the binary
+
+The shipped binaries reproduce. Measured at the compiler pinned in `deps.edn`,
+compiling `kotoba/*.kotoba` today produces `kotoba/*.wasm` **byte for byte**,
+and two compilations of one source agree.
+
+`inga.kotoba-provenance-test` reads the records the compiler writes and says of
+itself that it does not claim reproducibility — a record proves the bytes are
+the ones whose digest was written beside the source whose digest was written,
+not that recompiling produces them. `inga.kotoba-reproducibility-test` closes
+that, because the missing ingredient turned out to be one line: the **builder
+commit**, which ADR-2608120200 named as the fleet-wide gap. It is the compiler
+pin in `deps.edn` `:test`, and the gate recompiles with it.
+
+Owning that pin rather than tracking the fleet's is what stops the gate being
+theatre. The same ADR declined to write a recompile gate for
+`kotoba-lang/provider` because it would go red every time the compiler moved;
+when the repo owns the pin, red means *the recorded builder is no longer the
+one that made these bytes*, which is a fact worth surfacing. Moving it is a
+real migration and not a bump — measured on `kura`, the compiler on `main`
+rejects sources these pins accept.
+
+```bash
+clojure -M:test:gen    # rebuild kotoba/*.wasm and their provenance records
+```
+
 ## The Filecoin half — F1 / F2 / F3
 
 ADR-2608038000 names three things Filecoin's SPC / FVM / FEVM contribute that
@@ -297,7 +391,10 @@ with the transactions. A test pins the trap behaviour so this note cannot go
 stale silently.
 
 Still not a full `.kotoba` machine body: the fold is metered in Kotoba, the
-op application is still cljc.
+op application is still cljc. **And the module is the reference, not the
+execution path** — `inga.fuel` decides. That is measured rather than pending;
+see [What the Kotoba cores actually run](#what-the-kotoba-cores-actually-run),
+where the trap above is one of the two reasons.
 
 ### F3 — the power table is committed state
 
@@ -568,7 +665,13 @@ walks well off the `n = 3f+1` grid, where that shortcut stops being safe.
 Every function in the module is `i64 -> i64`, using only `+ - * quot` and
 comparison, which is the word-typed slice
 `kotoba.kir/only-native-word-typed-features?` admits — so it also compiles for
-the native AOT backends, not only wasm32.
+the native AOT backends, not only wasm32. That claim is now checked rather than
+asserted (`inga.kotoba-reproducibility-test`); it used to be prose.
+
+The module is the reference and **not** the execution path — `inga.consensus` /
+`inga.quorum` / `inga.stake` decide. Why the port stops there, with the
+numbers, is [What the Kotoba cores actually
+run](#what-the-kotoba-cores-actually-run).
 
 ### Slashing still does not fire, and that is a decision, not a bug
 
