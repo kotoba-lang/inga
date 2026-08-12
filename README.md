@@ -538,6 +538,38 @@ a replica now carries `:quorum-profile`, so what a deployment actually resists
 is a value you can ask it for. An unlabelled predicate reports `:head-count`
 rather than being upgraded on the caller's behalf.
 
+#### The thresholds have a Kotoba implementation
+
+Same arrangement F2 uses for the metering arithmetic, applied to the other
+number a replica cannot be alone in believing. `kotoba/quorum.kotoba` compiles
+to the checked-in `kotoba/quorum.wasm`, and `inga.quorum-kotoba-test`
+instantiates that binary and compares it against the live `inga.consensus` /
+`inga.quorum` / `inga.stake` functions. The Kotoba module is the reference; if
+they ever disagree, the Kotoba answer is the correct one.
+
+What crossed is arithmetic and nothing else — `quorum-size`,
+`byzantine-tolerance`, `one-honest`, the comparison inside `at-least`'s
+closure, and the `>2/3`-of-stake rule with its unbonded head-count fallback and
+the branch that chooses between them. Counting distinct witnesses, summing
+bonds, verifying signatures, attaching a `::profile` to a closure and
+`->predicate`'s dispatch on a runtime type all stay in the `.cljc`: they are
+folds and dispatches, not decisions. `stake-quorum-met?` reduces to a
+two-integer comparison the moment its two sums exist, and the test makes that
+seam visible — `inga.stake/total-stake` produces the sums, the guest decides.
+
+A disagreement about a threshold is worse in kind than one about a budget. A
+replica computing a smaller quorum than its peers forms certificates the rest
+of the network will not accept; one computing a larger one refuses valid ones.
+At n = 6 the safe rule says 4 and the familiar `2f+1` shortcut says 3 — and two
+disjoint 3-subsets of 6 are two conflicting certificates at one height, which
+is the outcome `inga.consensus` claims cannot happen. The matrix therefore
+walks well off the `n = 3f+1` grid, where that shortcut stops being safe.
+
+Every function in the module is `i64 -> i64`, using only `+ - * quot` and
+comparison, which is the word-typed slice
+`kotoba.kir/only-native-word-typed-features?` admits — so it also compiles for
+the native AOT backends, not only wasm32.
+
 ### Slashing still does not fire, and that is a decision, not a bug
 
 `inga.stake` implements bonding, stake-weighted quorum and equivocation-only

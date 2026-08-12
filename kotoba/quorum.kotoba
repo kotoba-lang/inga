@@ -1,0 +1,155 @@
+(ns inga.quorum)
+
+;; Every number that answers "is this a quorum", in Kotoba.
+;;
+;; `inga.quorum` is a namespace of PREDICATES, and a predicate is a closure --
+;; `at-least` returns a function, `stake-weighted` returns a function carrying
+;; a profile in its metadata, `->predicate` dispatches on the runtime type of
+;; its argument. None of that crosses, and none of it is the decision. The
+;; decision is the arithmetic inside: a threshold derived from n, and a
+;; comparison of an already-resolved count or sum against it.
+;;
+;; That arithmetic is spread over three namespaces -- `inga.consensus` owns
+;; `quorum-size`/`byzantine-tolerance`, `inga.quorum` owns `one-honest` and
+;; what `at-least`'s closure does, `inga.stake` owns the >2/3-of-stake rule
+;; and its unbonded head-count fallback -- and it is one subject. A replica
+;; that computes a different threshold than its peers does not produce a
+;; wrong number somebody notices; it produces two certificates at one height,
+;; or a certificate nobody else will accept, and either way the safety lemma
+;; the whole system rests on is gone. Same argument `kotoba/fuel.kotoba`
+;; makes for the metering arithmetic, applied to the other number a replica
+;; cannot be alone in believing.
+;;
+;; ## What is NOT here, deliberately
+;;
+;; Counting the witnesses, summing the bonds, deduplicating votes by witness,
+;; verifying signatures, attaching a profile to a closure, and choosing which
+;; predicate to hand a caller all stay in the cljc. They are folds over
+;; collections and dispatches on runtime types, not decisions -- and
+;; `stake-quorum-met?` reduces to a two-integer comparison the moment its two
+;; sums exist. `total-stake` produces the sums; `stake-met` below decides.
+;;
+;; ## Pure i64 by construction
+;;
+;; No capability is declared because none is needed. Every function here takes
+;; i64 and returns i64, uses only `+ - * quot` and comparison, and calls only
+;; other functions in this module -- which is exactly the word-typed slice
+;; `kotoba.kir/only-native-word-typed-features?` admits, so this module is
+;; native-AOT-qualifiable as well as wasm32.
+;;
+;; ## Predicates return 1/0, not :bool
+;;
+;; Following `fuel.kotoba`'s `fits`, and not merely for consistency: every
+;; comparison in this frontend infers as `:i64`, never `:bool` (a literal
+;; `true`/`false` is the only way to obtain a genuine `:bool` value at all --
+;; see the comment on `only-native-word-typed-features?` in kotoba-kir). A
+;; `:bool`-returning predicate would therefore have to wrap the comparison it
+;; already computed, and the wasm export would still hand JavaScript a number.
+
+;; ── thresholds derived from n ───────────────────────────────────────────────
+
+;; `inga.consensus/byzantine-tolerance`: f for a given n, where n = 3f+1.
+;;
+;; `quot` truncates toward zero on both sides -- Clojure's `quot` by
+;; definition, wasm's `i64.div_s` by the spec -- so the two agree on n = 0
+;; (`(quot -1 3)` is 0, not -1) without either being told to.
+(defn byzantine-tolerance [n :i64] :i64
+  (quot (- n 1) 3))
+
+;; `inga.consensus/quorum-size`: the smallest quorum that is SAFE for n, i.e.
+;; the smallest size at which any two quorums must share an honest witness.
+;;
+;; Stated as ceil((n + f + 1) / 2) rather than 2f+1, because 2f+1 is only
+;; equal to it ON the n = 3f+1 grid and is silently unsafe off it: at n = 6,
+;; f = 1, 2f+1 = 3 admits two DISJOINT quorums, which is two conflicting
+;; certificates at one height. The cljc computes the ceiling as
+;; `(quot (+ n f 2) 2)`; the same integer division is written out here.
+;;
+;;     n=4 -> 3    n=5 -> 4    n=6 -> 4    n=7 -> 5    n=10 -> 7
+(defn quorum-size [n :i64] :i64
+  (quot (+ (+ n (byzantine-tolerance n)) 2) 2))
+
+;; `inga.quorum/one-honest`: f+1, the smallest number of DISTINCT witnesses
+;; that must contain at least one honest one.
+;;
+;; Not a quorum and used for a different job: a quorum decides what is agreed,
+;; this decides what is BELIEVABLE. Head count only -- the stake-weighted
+;; analogue is deliberately unimplemented in the cljc and is not invented here.
+(defn one-honest [n :i64] :i64
+  (+ (byzantine-tolerance n) 1))
+
+;; ── head count ──────────────────────────────────────────────────────────────
+
+;; The body of the closure `inga.quorum/at-least` returns: at least `threshold`
+;; distinct witnesses voted. 1 = quorum, 0 = not.
+;;
+;; `votes` is the count of DISTINCT witnesses. Distinctness is the caller's --
+;; `inga.consensus/qc` takes `(set (map :inga.vote/witness votes))` before it
+;; ever reaches a threshold -- and that dedup is the place equivocation is
+;; neutralised, so it is worth naming what this function is trusting.
+(defn at-least-met [votes :i64 threshold :i64] :i64
+  (if (>= votes threshold) 1 0))
+
+;; The body of the closure `inga.quorum/for-set-size` returns. Takes n, the
+;; size of the SET, and derives the threshold -- which is the whole reason the
+;; cljc names it apart from `at-least`: `(at-least 4)` requires four votes and
+;; `(for-set-size 4)` requires three, and the two read identically at a call
+;; site if the number is allowed to mean either.
+(defn for-set-size-met [votes :i64 n :i64] :i64
+  (at-least-met votes (quorum-size n)))
+
+;; ── stake weight ────────────────────────────────────────────────────────────
+
+;; The decision inside `inga.stake/stake-quorum-met?`, once `total-stake` has
+;; produced its two sums: more than two thirds of the total bonded stake.
+;;
+;; `(> (* 3 voted) (* 2 total))` and not `(> (/ voted total) (2/3))`: the
+;; cross-multiplied form is exact in integers, has no rounding to disagree
+;; about between replicas, and is what the cljc writes. STRICTLY greater --
+;; exactly two thirds is not a quorum, which is what makes two quorums
+;; intersect in more than a third of the stake.
+;;
+;; Zero total is 0 and not 1. The cljc's `(and (pos? total) ...)` guard is not
+;; a special case bolted on: with no stake at all, `(> 0 0)` is false anyway,
+;; but `(> (* 3 0) (* 2 0))` would also be false for a FULL set, so without
+;; the guard the answer would be "no quorum" for a reason that has nothing to
+;; do with who voted. `inga.stake/quorum-met?` reads this branch and falls
+;; back -- see `stake-basis` / `counted-unbonded-met`.
+(defn stake-met [voted-stake :i64 total-stake :i64] :i64
+  (if (> total-stake 0)
+    (if (> (* 3 voted-stake) (* 2 total-stake)) 1 0)
+    0))
+
+;; Which security basis `inga.stake/quorum-met?` is operating under.
+;; 1 = :stake-weighted (Sybil-resistant), 0 = :counted-unbonded (NOT).
+;;
+;; This is a decision and not a label. The cljc returns it in-band precisely
+;; so a caller cannot read `:met? true` and believe it got Byzantine security
+;; when nobody has bonded anything; a replica that took the other branch than
+;; its peers would be applying a different rule under the same name.
+(defn stake-basis [total-stake :i64] :i64
+  (if (> total-stake 0) 1 0))
+
+;; `inga.stake/quorum-met?`'s fallback branch: more than two thirds of the
+;; enumerated roster BY HEAD when no collateral is bonded.
+;;
+;; Same cross-multiplied comparison as `stake-met`, over counts instead of
+;; sums, with the same strictness. It is a liveness arrangement and not BFT --
+;; anyone can mint did:keys for free -- and it is ported because it is a rule
+;; replicas must agree on, not because it is a good one.
+(defn counted-unbonded-met [n-voted :i64 n :i64] :i64
+  (if (> n 0)
+    (if (> (* 3 n-voted) (* 2 n)) 1 0)
+    0))
+
+;; The composite `inga.stake/quorum-met?` answers with, given all four
+;; already-resolved numbers: whichever branch `stake-basis` selects.
+(defn quorum-met [voted-stake :i64 total-stake :i64 n-voted :i64 n :i64] :i64
+  (if (> total-stake 0)
+    (stake-met voted-stake total-stake)
+    (counted-unbonded-met n-voted n)))
+
+;; n = 4 is the smallest set with a nonzero f, so this is the smallest input
+;; on which quorum-size is not simply "everyone".
+(defn main [] :i64
+  (quorum-size 4))
