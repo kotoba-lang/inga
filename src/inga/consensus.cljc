@@ -214,6 +214,48 @@
           (recur lo mid)))
       lo)))
 
+(defn two-chain-commits
+  "Blocks committed under the TWO-chain rule: `b0` commits once a single block
+  `b1` directly extends it AND claims the very next round.
+
+  ## Why one link is enough here, and only here
+
+  The three-chain rule is what makes a bare \"lock on the highest QC\" view
+  change safe: with nothing carried to prove a round failed, a replica cannot
+  tell a leader that skipped ahead legitimately from one rewriting history, so
+  it waits for a third block before believing the first.
+
+  This implementation does carry that proof. `entitled-round` gives a block
+  extending a parent exactly one round past the parent's, and a proposal
+  claiming any further ahead is refused unless the proposer can show a quorum
+  of new-views for the round it skipped (`inga.replica/can-justify-skip?`).
+  So a `b1` at `round(b0)+1` is a block nobody could have produced while any
+  competing branch at that round was still live — which is the property the
+  third block was standing in for. That is Jolteon's rule, reached from the
+  same premise.
+
+  **The round check is not decoration.** Without it this would commit on a
+  link alone, and a leader that skipped rounds with a timeout certificate
+  could commit a block whose round is arbitrarily far from its parent's —
+  exactly the case the extra link exists to exclude. `direct-extends?` checks
+  the hash and the certificate; the round is the third thing, and it is the
+  one that makes one link sufficient.
+
+  Same `above-height` bound as `three-chain-commits`, for the same reason: the
+  windows below what a caller already committed are work it would discard."
+  ([hash-fn chain] (two-chain-commits hash-fn chain nil))
+  ([hash-fn chain above-height]
+   (let [n (count chain)
+         start (if (nil? above-height) 0 (first-index-above chain above-height))]
+     (vec
+      (keep (fn [i]
+              (let [b0 (nth chain i) b1 (nth chain (inc i))]
+                (when (and (direct-extends? hash-fn b0 b1)
+                           (= (inc (:inga.block/round b0 0))
+                              (:inga.block/round b1 -1)))
+                  b0)))
+            (range start (max 0 (dec n))))))))
+
 (defn three-chain-commits
   "Given `chain` (a vector of blocks in strictly increasing height order,
   each carrying a :inga.block/justify QC for its immediate predecessor —

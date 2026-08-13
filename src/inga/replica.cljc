@@ -228,7 +228,7 @@
   kept because every managed deployment wants it, and it is RECORDED as
   `:head-count` because a deployment that believes it has Sybil resistance
   while counting heads has the belief and not the property."
-  [{:keys [witness witnesses quorum genesis hash-fn params
+  [{:keys [witness witnesses quorum genesis hash-fn params commit-rule
            chain-id sign-fn verify-fn machine]}]
   (let [params (merge default-params params)
         witness (wire/wire-id witness)
@@ -241,6 +241,8 @@
      :quorum (or quorum (count witnesses))
      :quorum-profile (q/profile (or quorum (count witnesses)))
      :hash-fn hash-fn
+     ;; `:three-chain` (default) or `:two-chain`. See `commits`.
+     :commit-rule (or commit-rule :three-chain)
      :params params
      ;; The signing seam. `chain-id` is domain separation: a vote signed on a
      ;; testnet must not authorise the same block on another chain, and the
@@ -335,7 +337,17 @@
         ;; the filter below keeps — and NOT the same amount of hashing. See
         ;; `three-chain-commits`: unbounded, this was quadratic, and it is
         ;; what stopped a deployed validator from ever finishing a catch-up.
-        all (c/three-chain-commits (:hash-fn state) (:chain state) h)]
+        ;; Which rule, chosen by the caller and defaulting to the one that
+        ;; needs no assumption about the view change.
+        ;;
+        ;; `:two-chain` is safe HERE because a proposal may only claim the
+        ;; round after its parent's unless the proposer shows a quorum of
+        ;; new-views for the round it skipped — see `can-justify-skip?` and
+        ;; `two-chain-commits`. A deployment that ever relaxed that check must
+        ;; move back, and the default is what it moves back to.
+        all (if (= :two-chain (:commit-rule state))
+              (c/two-chain-commits (:hash-fn state) (:chain state) h)
+              (c/three-chain-commits (:hash-fn state) (:chain state) h))]
     (vec (filter #(> (:inga.block/height %) h) all))))
 
 (defn- absorb-commits
