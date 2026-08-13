@@ -1341,6 +1341,14 @@
     :evidence (handle-evidence state msg)
     [state []]))
 
+(def ^:const sync-ask-ms
+  "The floor between two sync-requests from one replica. **1000.**
+
+  A second is long next to a block and short next to an outage, which is the
+  range this is for. It is a floor and not a period: the view gate still
+  applies, so a healthy replica that never times out never asks at all."
+  1000)
+
 (defn on-tick
   "Time passed. Times the view out when the deadline has gone by, and
   proposes when this replica leads and holds a certificate for the tip.
@@ -1392,7 +1400,24 @@
               ;; Once per view, for the same reason the tip re-vote is: a
               ;; condition that never clears turns any tick-driven sender into
               ;; a flood, which is a mistake this file has already made once.
-              ask (when-not (= (:view (:pm state')) (:last-sync-ask state))
+              ;; Once per view AND at most once per `sync-ask-ms`.
+              ;;
+              ;; "Once per view" was the whole limit, and it stops being one
+              ;; when the view runs away from the height: a stalled chain times
+              ;; out continuously, so once-per-view becomes once-per-timeout.
+              ;; Measured on the deployed chain, stuck at height 40853 with
+              ;; view 43403 — two and a half thousand views ahead:
+              ;;
+              ;;   sync-response 8238   sync-request 4611
+              ;;   proposal      3324   vote           991
+              ;;
+              ;; Every timed-out view asked three peers, each answered with a
+              ;; segment, and the votes that would have certified the tip were
+              ;; one message in nine. **The recovery was eating the transport
+              ;; it needed.** A replica that has asked and not been helped
+              ;; should ask LESS often, not more.
+              ask (when-not (or (= (:view (:pm state')) (:last-sync-ask state))
+                                (< now (+ (:last-sync-ask-at state 0) sync-ask-ms)))
                     [{:to :all
                       :msg {:type :sync-request
                             :witness (:id state')
@@ -1401,7 +1426,9 @@
                             ;; above us. `handle-sync-request` answers with
                             ;; what it actually holds.
                             :to (+ (height state') (:max-batch sync/default-params))}}])
-              state' (cond-> state' ask (assoc :last-sync-ask (:view (:pm state'))))]
+              state' (cond-> state'
+                       ask (assoc :last-sync-ask (:view (:pm state'))
+                                  :last-sync-ask-at now))]
           [state' (into (into [{:to :all :msg msg}] (vec ask)) out)]))
       ;; An uncertified tip is the one state a tick can fix and used not to.
       ;;
