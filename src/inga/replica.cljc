@@ -1472,6 +1472,43 @@
          (into [{:to :all :msg {:type :proposal :block b}}] out)])
       [state []])))
 
+(defn- catch-up-view
+  "Come back at the view the chain says the network had reached.
+
+  `replay` restores the chain, the certificates and the voted heights, and
+  left the VIEW at whatever a fresh pacemaker starts with. A certificate
+  inside a block only says which view certified the block's PARENT, and
+  `pm/on-qc` does not move the view at all — so a replica came back behind the
+  round its own tip was proposed in.
+
+  Leadership rotates by round. Being behind it is not a small lag: the round
+  entitled to extend the tip is `(inc (round tip))`, one replica leads it, and
+  every other replica answers `not-my-round` and waits. If the one that leads
+  it is also the one that is behind, nobody proposes at all.
+
+  Measured on the deployed v2 after a restart, with `propose` finally saying
+  why it declined:
+
+    w1  not-my-round               height 6800  round 7530  leads w3  view 6703
+    w2  not-my-round               height 6800  round 7530  leads w3  view 6703
+    w3  no-certificate-for-the-tip height 6794  round 6795  leads w4  view 6703
+
+  Every replica agreed the next round was 7530 and that w3 led it; every
+  replica was eight hundred views short of it; and w3, the one that had to
+  propose, was six blocks behind. The chain sat there. `/reset` cleared it
+  because reset puts the rounds back to zero along with everything else —
+  which is why the recovery looked like magic and was really just the view and
+  the rounds agreeing again.
+
+  A block's round is evidence the same way a certificate is: the replica
+  adopted and voted for that block, so a quorum was at that view. Raising to
+  it is the same forward jump `pm/on-timeout-certificate` makes, from a
+  different piece of evidence."
+  [state]
+  (let [r (:inga.block/round (tip state))]
+    (cond-> state
+      (integer? r) (update :pm pm/enter-at-least (inc r)))))
+
 (defn replay
   "Adopt blocks this replica already accepted, without re-verifying them.
 
@@ -1499,7 +1536,8 @@
     equivocation — the one crime this system slashes for, committed by
     accident, against itself."
   [state blocks]
-  (reduce (fn [s b]
+  (catch-up-view
+   (reduce (fn [s b]
             (let [s (-> s (remember-block b) (extend-chain b))
                   j (:inga.block/justify b)]
               (cond-> (update s :voted conj (:inga.block/height b))
@@ -1507,7 +1545,7 @@
                                 (assoc j :inga.qc/origin :replay))
                       (update :pm pm/on-qc j)))))
           state
-          (sort-by :inga.block/height blocks)))
+          (sort-by :inga.block/height blocks))))
 
 (def ^:const resume-tail
   "How many blocks a snapshot keeps.
