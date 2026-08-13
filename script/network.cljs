@@ -219,7 +219,12 @@
                                 :commit-rule (if (= "two-chain"
                                                     (some-> js/process .-env .-COMMIT_RULE))
                                                :two-chain
-                                               :three-chain)}))
+                                               :three-chain)
+                                ;; `VOTE_ROUTING=leader nbb ...`
+                                :vote-routing (if (= "leader"
+                                                     (some-> js/process .-env .-VOTE_ROUTING))
+                                                :leader
+                                                :broadcast)}))
         registry (atom {})
         sent (atom 0)
         recv (atom 0)
