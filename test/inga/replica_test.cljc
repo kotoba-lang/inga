@@ -459,6 +459,21 @@
         (is (seq (filter #(and (= :vote (:type (:msg %))) (:sig (:msg %))) out'))
             "voted without a signature")))))
 
+(deftest a-replica-that-signs-elsewhere-still-votes
+  (testing "the other direction, and the regression that shipped. A
+            Cloudflare Worker cannot sign synchronously, so it runs with no
+            `sign-fn` on purpose: the replica emits the vote unsigned,
+            dispatch signs it and folds the signed copy back. Refusing to emit
+            a vote merely because it has no signature left dispatch with
+            nothing to sign, and the deployed chain stopped harder than the
+            bug being fixed. Absence of signing here is not failure to sign."
+    (let [s (assoc (checked-replica :w1) :sign-fn nil)
+          b1 (chained-child (r/tip s) 1 true)
+          [s' out] (r/on-message s {:type :proposal :block b1} 1000)]
+      (is (seq (filter #(= :vote (:type (:msg %))) out))
+          "emitted nothing for dispatch to sign")
+      (is (r/voted? s' 1)))))
+
 (deftest the-certified-prefix-survives-a-bad-tail
   (testing "the refusal above was whole, and that is what deadlocked two
             deployments. A peer offers what it has; the blocks past a failed
