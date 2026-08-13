@@ -243,14 +243,70 @@
   "One round of catching up. Returns
   `{:chain c :adopted n}` on success or `{:chain c :adopted 0 :reason r}`.
 
-  The chain is returned unchanged on any failure — the segment is rejected
-  whole. Adopting the valid prefix of a bad segment would let a peer decide
-  where the replica's history ends by appending garbage to a good answer."
+  ## The certified prefix, not the whole segment
+
+  This refused a segment whole, on the argument that adopting the valid prefix
+  of a bad one lets a peer decide where the replica's history ends by
+  appending garbage to a good answer. The argument is right about garbage and
+  wrong about the ordinary case, because of how chained HotStuff carries
+  certificates: **a block's certificate travels in the block AFTER it**, so the
+  last block of ANY segment is uncertified by construction. A peer offering
+  everything it has therefore always offers an uncertified tail — and the
+  whole thing, certified prefix included, was refused.
+
+  Measured on two deployments: replicas that restarted at checkpoints a
+  hundred blocks apart were offered the blocks between and adopted zero,
+  reason `:below-quorum`, forever. Nothing after the split could ever be
+  certified, because certifying needed the quorum the split had broken. Both
+  chains stalled until every replica was reset by hand.
+
+  And the whole refusal never bought what it claimed. A peer can always send
+  the certified prefix ALONE — truncating its own answer is free — so
+  appending garbage to a good answer gains an attacker nothing that honesty
+  would not. What has to hold is only that the garbage is never adopted.
+
+  So: refuse the segment whole for any STRUCTURAL defect — a broken hash
+  chain, a proposer that does not lead its height, a bad signature — and for
+  an UNCERTIFIED TAIL, adopt the certified prefix. The prefix is precisely
+  what a quorum has already agreed to, which is the one thing a peer cannot
+  fabricate. Garbage appended to a good answer still buys nothing: it is
+  uncertified, so it is exactly what gets dropped.
+
+  Returns `:reason :uncertified-tail-only` when it adopted a prefix, so a
+  caller can tell a partial catch-up from a complete one."
   ([hash-fn quorum chain segment params]
    (sync-step hash-fn quorum chain segment params nil nil))
   ([hash-fn quorum chain segment params chain-id verify-fn]
    (let [anchor (last chain)]
-    (if-let [reason (validate-segment hash-fn quorum anchor segment params
-                                      chain-id verify-fn)]
-      {:chain chain :adopted 0 :reason reason}
-      {:chain (adopt chain segment) :adopted (count segment)}))))
+     (if-let [reason (validate-segment hash-fn quorum anchor segment params
+                                       chain-id verify-fn)]
+       (if (not= :below-quorum reason)
+         ;; Structural: the segment is not what it claims to be. Whole refusal
+         ;; is the only safe answer, and the argument this function was
+         ;; written with applies unchanged.
+         {:chain chain :adopted 0 :reason reason}
+         ;; Certificates: find where they stop and keep what is behind it.
+         (let [;; `admitted?` is a PREDICATE built from the witness list, not the
+               ;; list. Passing the list itself threw "Key must be integer" out
+               ;; of the certificate verifier -- the same mistake the
+               ;; `first-uncertified` docstring warns about, one layer down.
+               bad (first-uncertified quorum segment chain-id verify-fn
+                                      (when-let [ws (:witnesses params)]
+                                        (wire/admits ws)))
+               idx (when bad
+                     (first (keep-indexed
+                             #(when (= (:inga.block/height %2)
+                                       (:inga.block/height bad)) %1)
+                             segment)))
+               prefix (if idx (subvec (vec segment) 0 idx) [])]
+           (if (empty? prefix)
+             {:chain chain :adopted 0 :reason reason}
+             ;; Re-validated, not assumed: the prefix has to stand on its own
+             ;; against the same anchor, or this would be trusting the shape
+             ;; of a segment that already failed once.
+             (if-let [r2 (validate-segment hash-fn quorum anchor prefix params
+                                           chain-id verify-fn)]
+               {:chain chain :adopted 0 :reason r2}
+               {:chain (adopt chain prefix) :adopted (count prefix)
+                :reason :uncertified-tail-only}))))
+       {:chain (adopt chain segment) :adopted (count segment)}))))
