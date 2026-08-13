@@ -882,7 +882,21 @@
     ;; Refusing to vote costs one round; the replica votes at that height on a
     ;; later tick, once signing works. `vote-on-tip` is already the path that
     ;; retries.
-    (if (and (:verify-fn state) (nil? sig))
+    ;; A signing FAILURE, not the absence of signing.
+    ;;
+    ;; The first cut refused whenever there was no signature, and that broke
+    ;; the deployment it was written for. A Cloudflare Worker cannot sign
+    ;; synchronously — WebCrypto is async — so it runs with NO `sign-fn` on
+    ;; purpose: the replica emits the vote unsigned, dispatch signs it, and
+    ;; folds the signed copy back as a message. Refusing to emit left dispatch
+    ;; with nothing to sign, so `could-not-sign` climbed on every tick and the
+    ;; chain stopped harder than before. Measured on v2 within a minute of
+    ;; the deploy.
+    ;;
+    ;; So: a replica that HAS a signing function and got nothing from it has
+    ;; failed to sign, and must not spend the height. A replica with no
+    ;; signing function is not failing — it signs somewhere else.
+    (if (and (:sign-fn state) (:verify-fn state) (nil? sig))
       [(update-in state [:dropped-votes :could-not-sign] (fnil inc 0)) []]
       (let [vote (cond-> {:witness (:witness state) :block-hash bh
                           :height ht :view view}
