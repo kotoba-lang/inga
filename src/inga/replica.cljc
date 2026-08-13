@@ -855,12 +855,40 @@
         bh (hf block)
         ht (:inga.block/height block)
         sig (when-let [f (:sign-fn state)]
-              (f (att/vote-payload (:chain-id state) view ht bh (:witness state))))
-        vote (cond-> {:witness (:witness state) :block-hash bh
-                      :height ht :view view}
-               sig (assoc :sig sig))
-        [state' out] (fold-vote (update state :voted conj ht) vote now)]
-    [state' (into [{:to (vote-to state block) :msg (assoc vote :type :vote)}] out)]))
+              (f (att/vote-payload (:chain-id state) view ht bh (:witness state))))]
+    ;; An unsigned vote on a signing chain is not a vote, and casting one must
+    ;; not spend the height.
+    ;;
+    ;; This built the vote, marked the height voted, and handed it to
+    ;; `fold-vote` -- which drops an unsigned vote when a `verify-fn` is
+    ;; configured, INCLUDING this replica's own. The vote went nowhere and the
+    ;; height was spent anyway: `voted?` answers yes from then on, so the
+    ;; replica never votes there again, and the tip it holds can never be
+    ;; certified. The chain sits on that tip forever.
+    ;;
+    ;; It fires on restart, which is why every deploy needed a hand-reset. A
+    ;; Durable Object derives its signing key asynchronously and ticks before
+    ;; the key is there, so the first vote after a restart is unsigned. From
+    ;; the deployed v2, all four replicas stuck at height 6793 with
+    ;; `votes-for-tip 0`:
+    ;;
+    ;;   dropped-votes    {unsigned 1}
+    ;;   last-dropped-vote {witness w1, height 6793, block-hash <its own tip>}
+    ;;   voted-at-tip?    true
+    ;;
+    ;; One unsigned vote, one burned height, and a chain that only `/reset`
+    ;; could restart -- because reset is what clears `:voted`.
+    ;;
+    ;; Refusing to vote costs one round; the replica votes at that height on a
+    ;; later tick, once signing works. `vote-on-tip` is already the path that
+    ;; retries.
+    (if (and (:verify-fn state) (nil? sig))
+      [(update-in state [:dropped-votes :could-not-sign] (fnil inc 0)) []]
+      (let [vote (cond-> {:witness (:witness state) :block-hash bh
+                          :height ht :view view}
+                   sig (assoc :sig sig))
+            [state' out] (fold-vote (update state :voted conj ht) vote now)]
+        [state' (into [{:to (vote-to state block) :msg (assoc vote :type :vote)}] out)]))))
 
 (defn- adopt-own
   "A proposer adopts and votes for its own block.

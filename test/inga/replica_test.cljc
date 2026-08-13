@@ -436,6 +436,29 @@
                    :proposer (c/led-by witnesses height)
                    :ts (* 10 height) :justify q})))
 
+(deftest a-vote-that-cannot-be-signed-does-not-spend-the-height
+  (testing "a Durable Object derives its signing key asynchronously and ticks
+            before the key is there, so the first vote after a restart is
+            unsigned -- and `fold-vote` drops an unsigned vote when a
+            verify-fn is configured, including the replica's own. The height
+            was marked voted anyway, so `voted?` answered yes from then on and
+            the tip could never be certified. Every deploy needed a hand-reset,
+            and reset worked because it is what clears `:voted`."
+    (let [s (checked-replica :w1)
+          b1 (chained-child (r/tip s) 1 true)
+          keyless (assoc s :sign-fn (fn [_] nil))
+          [s' out] (r/on-message keyless {:type :proposal :block b1} 1000)]
+      (is (not (r/voted? s' 1))
+          "spent height 1 on a vote that was thrown away")
+      (is (empty? (filter #(= :vote (:type (:msg %))) out))
+          "sent a vote it drops itself")
+      ;; and once the key is there, the height is still there to vote at
+      (let [[s'' out'] (r/on-message (assoc s' :sign-fn (:sign-fn s))
+                                     {:type :proposal :block b1} 1100)]
+        (is (r/voted? s'' 1) "never voted at all")
+        (is (seq (filter #(and (= :vote (:type (:msg %))) (:sig (:msg %))) out'))
+            "voted without a signature")))))
+
 (deftest the-certified-prefix-survives-a-bad-tail
   (testing "the refusal above was whole, and that is what deadlocked two
             deployments. A peer offers what it has; the blocks past a failed
