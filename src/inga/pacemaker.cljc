@@ -201,6 +201,17 @@
         (assoc :failures 0)
         (assoc :deadline (+ now (timeout-for 0 params))))))
 
+(defn enter-at-least
+  "Raise the view to `view` if it is behind. Monotone, like every other view
+  move here — a view that could go backwards is not a view.
+
+  For the one caller that knows a view was reached without having a message
+  that says so: a replica replaying its own chain. A block carries the round
+  it was proposed in, and a certified block proves a quorum was at that view,
+  so a replica holding it is behind if its own view is lower."
+  [state view]
+  (cond-> state (> view (:view state)) (assoc :view view :failures 0)))
+
 (defn on-progress
   "A round produced a certified block. The failure count resets, which is what
   makes the backoff track CONSECUTIVE failures rather than total ones — a

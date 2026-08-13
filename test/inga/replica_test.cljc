@@ -498,6 +498,25 @@
       (is (some? (:leads-that-round why))
           "the round's leader is the fact the outside instrument got wrong"))))
 
+(deftest a-replay-does-not-come-back-behind-its-own-tip
+  (testing "leadership rotates by ROUND. A replica that replays its chain and
+            comes back at a lower view is not slightly behind: the round
+            entitled to extend the tip is one past the tip's round, exactly
+            one replica leads it, and everybody else answers `not-my-round`.
+
+            Deployed v2 after a restart: all four agreed the next round was
+            7530 and that w3 led it, all four were eight hundred views short,
+            and w3 was six blocks behind. Nobody proposed. `/reset` cleared it
+            because reset puts the rounds back to zero too."
+    (let [s (checked-replica :w1)
+          far (c/make-block {:height 1 :parent-hash (hash-fn (r/tip s))
+                             :proposals [] :round 500
+                             :proposer (c/led-by witnesses 500)
+                             :ts 10 :justify (genuine-cert (hash-fn (r/tip s)) 0)})
+          s' (r/replay s [far])]
+      (is (> (:view (:pm s')) 500)
+          "came back behind the round its own tip was proposed in"))))
+
 (deftest the-certified-prefix-survives-a-bad-tail
   (testing "the refusal above was whole, and that is what deadlocked two
             deployments. A peer offers what it has; the blocks past a failed
