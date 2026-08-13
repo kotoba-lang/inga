@@ -520,10 +520,36 @@
                              :ts (+ (:inga.block/ts t)
                                     (:block-interval (:params state)))
                              :justify justify})
-            [state' out] (adopt-own state b now)]
+            [state' out] (adopt-own state b now)
+            state' (assoc state' :propose-refusal nil)]
         [(assoc state' :pending [] :last-proposed-at now)
          (into [{:to :all :msg {:type :proposal :block b}}] out)])
-      [state []])))
+      ;; Silence with three reasons behind it.
+      ;;
+      ;; This returned `[state []]` and said nothing, so a chain that had
+      ;; stopped looked exactly like a chain with nothing to do. The Worker
+      ;; built its own answer from the outside and got it wrong: it decided
+      ;; whose turn it was by HEIGHT, while this decides by ROUND, and once
+      ;; the view had run ahead of the height the two named different
+      ;; replicas. The deployed instrument then read `blocked-by nothing,
+      ;; would-propose true` on a replica that was not proposing — a wrong
+      ;; answer with evidence attached, which is worse than no answer.
+      ;;
+      ;; The three conditions, and which of them said no.
+      [(assoc state :propose-refusal
+              (let [pr (proposable-round state t)]
+                {:reason (cond (nil? justify) :no-certificate-for-the-tip
+                               (not (my-turn? state pr)) :not-my-round
+                               :else :too-soon)
+                 :height h
+                 :round pr
+                 :leads-that-round (c/led-by (:witnesses state) pr)
+                 :me (:witness state)
+                 :view (:view (:pm state))
+                 :ms-early (max 0 (- (+ (:last-proposed-at state)
+                                        (:block-interval (:params state)))
+                                     now))}))
+       []])))
 
 ;; ── incoming ────────────────────────────────────────────────────────────────
 
