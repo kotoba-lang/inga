@@ -66,9 +66,14 @@
           fabricated (honest-chain 5)     ; identical shape, but we hold nothing
           held [(blk 0 "genesis" :w9 nil)]  ; a DIFFERENT genesis
           segment (subvec fabricated 1)]
-      (is (= :uncertified
+      ;; `:does-not-link`, not `:uncertified`. The fabricated history is
+      ;; internally consistent — its certificates are fine — and what is wrong
+      ;; is that its first block names a parent we do not hold. The two used
+      ;; to share a name, and a replica seventy blocks behind reported the
+      ;; certificate one while the fact was this one.
+      (is (= :does-not-link
              (sync/validate-segment h quorum (first held) segment params))
-          "its first block's justify certifies a parent we do not have"))))
+          "its first block names a parent we do not have"))))
 
 (deftest a-segment-starting-at-the-wrong-height-is-refused
   (let [chain (honest-chain 6)

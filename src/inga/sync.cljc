@@ -58,6 +58,7 @@
     :does-not-attach
     :non-contiguous
     :uncertified
+    :does-not-link
     :below-quorum
     :wrong-proposer})
 
@@ -163,6 +164,19 @@
             (nil? b) nil
             (not (quorum-ok? (:inga.block/justify b) quorum chain-id verify-fn admitted?))
             :below-quorum
+            ;; `direct-extends?` is TWO checks: the parent hash links, and
+            ;; the justify certifies that same parent. Answering `:uncertified`
+            ;; for both names one of them and sends the reader at the
+            ;; certificates when the problem is the link.
+            ;;
+            ;; Measured on four replicas: one sat seventy blocks behind
+            ;; reporting `{offered 71, from 147, adopted 0, reason
+            ;; uncertified}`, which reads as "my peers are sending me blocks
+            ;; nobody signed" — while the fact was that its own block 146 was
+            ;; not the block they had. Two failures under one name is the
+            ;; shape of instrument this workspace has now paid for four times.
+            (not= (hash-fn prev) (:inga.block/parent-hash b)) :does-not-link
+
             (not (c/direct-extends? hash-fn prev b)) :uncertified
 
             ;; Who proposed it. `handle-proposal` is not the only way a block
