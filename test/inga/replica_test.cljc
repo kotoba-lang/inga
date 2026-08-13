@@ -474,6 +474,30 @@
           "emitted nothing for dispatch to sign")
       (is (r/voted? s' 1)))))
 
+(deftest a-replica-that-does-not-propose-says-which-condition-said-no
+  (testing "`propose` returned `[state []]` and said nothing, so a stopped
+            chain looked like a chain with nothing to do. The Worker built its
+            own answer from outside and decided whose turn it was by HEIGHT,
+            while `propose` decides by ROUND -- once the view ran ahead of the
+            height those named different replicas, and the deployed instrument
+            read `blocked-by nothing, would-propose true` on a replica that was
+            not proposing."
+    (let [s (checked-replica :w1)
+          ;; height 1's leader by round is not w1 for every round, and w1
+          ;; holds no certificate for genesis either way.
+          ;; the first tick only starts the clock -- `pm/initial` leaves the
+          ;; deadline at 0 and that branch returns before `propose` is reached
+          [s0 _] (r/on-tick s 100000)
+          [s' out] (r/on-tick s0 100001)
+          why (:propose-refusal s')]
+      (is (empty? (filter #(= :proposal (:type (:msg %))) out)))
+      (is (some? why) "declined and recorded nothing")
+      (is (contains? #{:no-certificate-for-the-tip :not-my-round :too-soon}
+                     (:reason why)))
+      (is (= (:witness s) (:me why)))
+      (is (some? (:leads-that-round why))
+          "the round's leader is the fact the outside instrument got wrong"))))
+
 (deftest the-certified-prefix-survives-a-bad-tail
   (testing "the refusal above was whole, and that is what deadlocked two
             deployments. A peer offers what it has; the blocks past a failed
