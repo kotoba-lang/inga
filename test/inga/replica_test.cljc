@@ -418,6 +418,45 @@
       (is (= 1 (r/height s')) "adopted a block certified by nobody")
       (is (empty? (filter #(= :sync-response (:type (:msg %))) out))))))
 
+(defn- chained-child
+  "Like `certified-child`, but at an explicit round, so several of these form
+  a segment a peer could really have sent. `certified-child` leaves every
+  block at round 1 (the round after the view-0 certificate it fabricates),
+  and `inga.sync` requires rounds to increase within a segment -- so a
+  multi-block segment built from it is refused as `:wrong-proposer` before
+  any of this test's subject is reached."
+  [parent height certify?]
+  (let [ph (hash-fn parent)
+        q (if certify?
+            (genuine-cert ph (:inga.block/height parent))
+            {:inga.qc/block-hash ph :inga.qc/height (:inga.block/height parent)
+             :inga.qc/view 0 :inga.qc/witnesses #{"w2" "w3" "w4"}
+             :inga.qc/vote-count 3 :inga.qc/sigs {"w2" "x" "w3" "y" "w4" "z"}})]
+    (c/make-block {:height height :parent-hash ph :proposals [] :round height
+                   :proposer (c/led-by witnesses height)
+                   :ts (* 10 height) :justify q})))
+
+(deftest the-certified-prefix-survives-a-bad-tail
+  (testing "the refusal above was whole, and that is what deadlocked two
+            deployments. A peer offers what it has; the blocks past a failed
+            quorum are uncertified; the certified ones in front of them went
+            down with the answer, so a replica behind a split could never
+            catch up to where the certified history actually reached.
+
+            Whole refusal never bought the safety it claimed, because a peer
+            can always send the prefix ALONE -- appending garbage to a good
+            answer gets it nothing that truncating the answer would not.
+            What must hold is that the garbage itself is never adopted."
+    (let [s  (checked-replica :w1)
+          b1 (chained-child (r/tip s) 1 true)
+          b2 (chained-child b1 2 true)
+          bad (chained-child b2 3 false)
+          [s' _] (r/on-message s {:type :sync-response :blocks [b1 b2 bad]} 1000)]
+      (is (= 2 (r/height s'))
+          "refused the certified prefix along with the tail -- the deadlock")
+      (is (not= (hash-fn bad) (hash-fn (r/tip s')))
+          "adopted a block certified by nobody"))))
+
 (deftest a-genuine-segment-is-adopted
   (testing "otherwise the refusal above is a check that refuses everything"
     (let [s (checked-replica :w1)
