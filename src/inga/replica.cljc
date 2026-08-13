@@ -228,7 +228,7 @@
   kept because every managed deployment wants it, and it is RECORDED as
   `:head-count` because a deployment that believes it has Sybil resistance
   while counting heads has the belief and not the property."
-  [{:keys [witness witnesses quorum genesis hash-fn params commit-rule
+  [{:keys [witness witnesses quorum genesis hash-fn params commit-rule vote-routing
            chain-id sign-fn verify-fn machine]}]
   (let [params (merge default-params params)
         witness (wire/wire-id witness)
@@ -243,6 +243,8 @@
      :hash-fn hash-fn
      ;; `:three-chain` (default) or `:two-chain`. See `commits`.
      :commit-rule (or commit-rule :three-chain)
+     ;; `:broadcast` (default) or `:leader`. See `vote-to`.
+     :vote-routing (or vote-routing :broadcast)
      :params params
      ;; The signing seam. `chain-id` is domain separation: a vote signed on a
      ;; testnet must not authorise the same block on another chain, and the
@@ -281,7 +283,7 @@
 
 ;; ── the chain ───────────────────────────────────────────────────────────────
 
-(declare adopt-own fold-vote cast-vote propose handle-new-view tip
+(declare adopt-own fold-vote cast-vote vote-to propose handle-new-view tip
          committed-height)
 
 (defn tip [state] (peek (:chain state)))
@@ -615,7 +617,8 @@
             mine (get-in state [:votes (hf block) (:witness state)])]
         (cond
           mine
-          [state [{:to :all :msg (cond-> {:type :vote
+          [state [{:to (vote-to state block)
+                   :msg (cond-> {:type :vote
                                           :witness (:witness state)
                                           :block-hash (hf block)
                                           :height h
@@ -798,6 +801,49 @@
           [state []]))
       [state []])))))))
 
+(defn- vote-to
+  "Who a vote for `block` is addressed to.
+
+  `:broadcast` (default) sends it to everyone: every replica folds votes into
+  certificates itself, which is why `/head` can report a `fold-vote` origin
+  for its tip certificate.
+
+  `:leader` sends it to the replica that will build on the block — the leader
+  of the next round — which is what HotStuff does and is n times fewer
+  messages per round. It is sound because the certificate only has to exist
+  where it is USED: the next proposer needs it to justify its block, and
+  everyone else receives it inside that proposal.
+
+  What it costs is the thing broadcast was quietly buying: a replica that is
+  not the next leader stops being able to certify the tip on its own, so a
+  proposer that misses the votes has to ask for them rather than having heard
+  them already.
+
+  ## Measured, and the saving does not pay for that cost
+
+  `script/network.cljs`, NET_DELAY=20, real sockets:
+
+      n=4   broadcast  126 heights   4425 msgs in
+            leader     127           4405
+
+      n=7   broadcast  100 heights   7471 msgs in
+            leader      94           7333
+
+  **Votes are not what this transport spends its messages on.** Cutting them
+  to one recipient moved the count by half a percent, and at seven witnesses
+  the round trip a proposer now needs to fetch the votes it did not hear cost
+  more than the messages saved — six fewer heights in the same wall clock.
+
+  So the default stays `:broadcast`. This is kept, opt-in, because the
+  measurement is worth being able to repeat: the balance could turn at a
+  larger validator set, and the way to find out is to run it rather than to
+  reason about message counts."
+  [state block]
+  (if (= :leader (:vote-routing state))
+    (c/leader-for (:witnesses state)
+                  (inc (:inga.block/round block (:inga.block/height block 0))))
+    :all))
+
 (defn- cast-vote
   "Vote for `block` at the current view: record it locally and emit it.
 
@@ -814,7 +860,7 @@
                       :height ht :view view}
                sig (assoc :sig sig))
         [state' out] (fold-vote (update state :voted conj ht) vote now)]
-    [state' (into [{:to :all :msg (assoc vote :type :vote)}] out)]))
+    [state' (into [{:to (vote-to state block) :msg (assoc vote :type :vote)}] out)]))
 
 (defn- adopt-own
   "A proposer adopts and votes for its own block.
@@ -1079,7 +1125,8 @@
 
       ;; Voted, and still holding the vote: re-send it rather than re-signing.
       mine
-      [state [{:to :all :msg (cond-> {:type :vote
+      [state [{:to (vote-to state t)
+               :msg (cond-> {:type :vote
                                       :witness (:witness state)
                                       :block-hash (hf t)
                                       :height h
