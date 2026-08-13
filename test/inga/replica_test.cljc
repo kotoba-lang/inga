@@ -1290,3 +1290,29 @@
     (let [p (iref/project [(head-record-for "main" 0 "cid-a")
                            (head-record-for "main" 0 "cid-b")])]
       (is (= "cid-a" (get-in p ["main" 0 "cid"]))))))
+
+(deftest a-stalled-replica-does-not-flood-its-peers-with-asking
+  (testing "\"once per view\" is not a limit when the view runs away from the
+            height. A stalled chain times out continuously, so once-per-view
+            becomes once-per-timeout — and the deployed chain measured
+            4,611 sync-requests and 8,238 answers against 991 votes, two and a
+            half thousand views past its height. The recovery was eating the
+            transport it needed."
+    (let [;; A one-millisecond view budget, so EVERY tick times out and the
+          ;; view moves — which is the state the deployed chain was in, two and
+          ;; a half thousand views past its height. With the ordinary
+          ;; second-long budget the view gate alone bounds this and the test
+          ;; proves nothing; it passed against a version with no floor at all
+          ;; before this line existed.
+          s (assoc-in (checked-replica :w1) [:params :base-timeout] 1)
+          [s' asks]
+          (reduce (fn [[st n] i]
+                    (let [[st' out] (r/on-tick st (+ 1000 (* i 40)))]
+                      [st' (+ n (count (filter #(= :sync-request (:type (:msg %))) out)))]))
+                  [s 0] (range 20))]
+      (is (<= asks 2)
+          "asked once per timed-out view, which is what the flood is made of")
+      ;; and after the floor has passed, it may ask again
+      (let [[_ out] (r/on-tick s' 60000)]
+        (is (<= (count (filter #(= :sync-request (:type (:msg %))) out)) 1)
+            "stopped asking altogether")))))
