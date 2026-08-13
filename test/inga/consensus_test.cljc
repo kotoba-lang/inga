@@ -191,3 +191,48 @@
       (is (< @n (/ unbounded 20))
           (str "bounded scan hashed " @n " of " unbounded
                " — the bound is not bounding anything")))))
+
+;; ── the two-chain rule ──────────────────────────────────────────────────────
+;;
+;; One link instead of two, which is only sound because a proposal may not
+;; claim a round further than one past its parent's without a timeout
+;; certificate. The round check is what carries that; these pin it.
+
+(defn- rounded-chain
+  "`linked-chain` with rounds set the way a live proposal sets them: one past
+  the parent's.
+
+  The shared fixture leaves `:round` to `make-block`'s default, which derives
+  it from the certificate's view — and the votes it builds carry no view, so
+  every block in it lands in the same round. That is fine for the three-chain
+  rule, which never looks, and it makes the two-chain rule commit nothing:
+  the round check is the whole reason one link is enough."
+  [nval n]
+  (vec (map-indexed (fn [i b] (assoc b :inga.block/round i)) (linked-chain nval n))))
+
+(deftest two-chain-commits-on-one-link
+  (let [chain (rounded-chain 4 2)]
+    (is (= 1 (count (consensus/two-chain-commits hash-fn chain)))
+        "one direct extension at the next round did not commit the parent")
+    (is (empty? (consensus/three-chain-commits hash-fn chain))
+        "the three-chain rule must still want a second link, or this proves nothing")))
+
+(deftest two-chain-lags-the-tip-by-one-and-three-chain-by-two
+  (let [chain (rounded-chain 4 6)]
+    (is (= (- (count chain) 1) (count (consensus/two-chain-commits hash-fn chain))))
+    (is (= (- (count chain) 2) (count (consensus/three-chain-commits hash-fn chain))))))
+
+(deftest a-skipped-round-does-not-commit-on-one-link
+  ;; The case the extra link existed to exclude: a leader that skipped rounds
+  ;; with a timeout certificate must not thereby commit its parent early.
+  (let [[g b1] (rounded-chain 4 2)
+        far (assoc b1 :inga.block/round 7)]
+    (is (empty? (consensus/two-chain-commits hash-fn [g far]))
+        "a block seven rounds past its parent committed it on one link")))
+
+(deftest two-chain-still-needs-a-real-link
+  ;; `direct-extends?` checks the hash AND the certificate; the round is the
+  ;; third thing, not a replacement for either.
+  (let [[g b1] (rounded-chain 4 2)
+        spliced (assoc b1 :inga.block/parent-hash "not-the-parent")]
+    (is (empty? (consensus/two-chain-commits hash-fn [g spliced])))))

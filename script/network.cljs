@@ -213,7 +213,13 @@
                                 :hash-fn hash-fn
                                 :chain-id chain-id
                                 :verify-fn verify-fn
-                                :machine machine}))
+                                :machine machine
+                                ;; `COMMIT_RULE=two-chain nbb ...` to run the
+                                ;; Jolteon rule. Default unchanged.
+                                :commit-rule (if (= "two-chain"
+                                                    (some-> js/process .-env .-COMMIT_RULE))
+                                               :two-chain
+                                               :three-chain)}))
         registry (atom {})
         sent (atom 0)
         recv (atom 0)
@@ -433,6 +439,10 @@
         chain (vec (rest (:chain old)))]
     (reset! (:state node)
             (r/replay (r/replica {:witness (:witness node)
+                                  :commit-rule (if (= "two-chain"
+                                                      (some-> js/process .-env .-COMMIT_RULE))
+                                                 :two-chain
+                                                 :three-chain)
                                   :witnesses witnesses
                                   :quorum (c/quorum-size (count witnesses))
                                   :hash-fn hash-fn
