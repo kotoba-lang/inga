@@ -288,6 +288,41 @@
 
 (defn tip [state] (peek (:chain state)))
 
+;; ── the deadlock this rule causes, and what fixing it needs ─────────────────
+;;
+;; One vote per HEIGHT is stricter than HotStuff, which votes once per VIEW and
+;; leaves safety to the lock rule (`pacemaker/safe-to-vote?`, already here and
+;; already correct). The extra strictness costs liveness in one specific way,
+;; and it is the way two deployments keep failing:
+;;
+;;   two blocks at one height, the votes split between them, and every replica
+;;   has spent its vote at that height. Nobody can move. In HotStuff the next
+;;   view produces a proposal on the highest QC and the fork resolves; here the
+;;   fork is permanent.
+;;
+;; Measured, repeatedly, on both deployed chains — most recently a chain reset
+;; to genesis that reached height 1927 and stopped with two replicas on one
+;; tip, one on another, and one behind. Every replica reported
+;; `no-certificate-for-the-tip`; every one of them had already voted.
+;;
+;; ## Why it is still here
+;;
+;; Changing it to one-vote-per-view was written and REVERTED. The rule needs
+;; the view a replica last voted in to survive a restart, and it does not:
+;; votes are memory. The obvious watermark — the tip's round — is not an upper
+;; bound, because a replica can have voted for a block at a higher round that
+;; never certified and so is not in its chain. Coming back below that view and
+;; voting again is equivocation, which is the one thing this system slashes
+;; for.
+;;
+;; Doing it properly means making the last voted view DURABLE: written when it
+;; changes, read on resume, and carried in `snapshot`. That is a design change
+;; to the persistence contract, not a condition swap, and it deserves its own
+;; pass rather than being smuggled in beside a latency fix.
+;;
+;; Stated here rather than in a note somewhere, because the next person to
+;; debug a stalled chain will land on this function.
+
 (defn voted?
   "Has this replica already voted at `h`?
 
