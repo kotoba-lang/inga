@@ -2095,9 +2095,30 @@
 
   The proofs are self-contained — `inga.stake/verify-equivocation-evidence`
   re-checks the pair rather than trusting that detection ran — so this can be
-  handed to somebody who did not see the votes arrive."
+  handed to somebody who did not see the votes arrive.
+
+  ## Stale evidence is not evidence
+
+  This read `:equivocations` raw, so proofs recorded under an older rule kept
+  condemning replicas after the rule was corrected. Detection used to key on
+  (witness, height) and called every legitimate view change a double-vote;
+  fixing detection did nothing for the four replicas that already held proofs
+  against each other — measured, `equivocators [w1 w2 w3 w4]` on a network
+  with one state root and nothing forked.
+
+  So the structural half of the rule is re-applied here: same witness, same
+  height, same VIEW, different block. Signatures are not re-checked (that is
+  `verified-equivocations`, which needs a verifier); this only drops entries
+  that were never the fingerprint in the first place."
   [state]
-  (into (sorted-set) (map :inga.evidence/witness (:equivocations state))))
+  (into (sorted-set)
+        (keep (fn [{:inga.evidence/keys [witness vote-a vote-b]}]
+                (when (and (= (:inga.vote/height vote-a) (:inga.vote/height vote-b))
+                           (= (:inga.vote/view vote-a 0) (:inga.vote/view vote-b 0))
+                           (not= (:inga.vote/block-hash vote-a)
+                                 (:inga.vote/block-hash vote-b)))
+                  witness))
+              (:equivocations state))))
 
 (defn verified-equivocations
   "The proofs that hold up under `verify-sig-fn`. Kept separate from

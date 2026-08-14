@@ -1715,3 +1715,27 @@
           (str "the chain never left the block it was stuck on — before "
                (sort-by key before) " after "
                (sort-by key (into {} (for [[v x] after] [v (r/height x)]))))))))
+
+(deftest stale-evidence-stops-condemning-once-the-rule-is-fixed
+  (testing "A replica keeps the proofs it recorded. Detection used to key on
+            (witness, height) and called every legitimate view change a
+            double-vote, so fixing detection did nothing for the four replicas
+            that already held proofs against each other — measured on the
+            deployed chain as equivocators [w1 w2 w3 w4] with one state root
+            and nothing forked."
+    (let [v (fn [h view hash]
+              {:inga.vote/witness :w2 :inga.vote/height h
+               :inga.vote/view view :inga.vote/block-hash hash})
+          with (fn [pair] (assoc (r/replica {:witness :w1 :witnesses witnesses
+                                             :quorum 3 :hash-fn hash-fn})
+                                 :equivocations [pair]))]
+      (is (empty? (r/equivocators
+                   (with {:inga.evidence/witness :w2
+                          :inga.evidence/vote-a (v 7 3 "a")
+                          :inga.evidence/vote-b (v 7 9 "b")})))
+          "a view change recorded under the old rule still condemns")
+      (is (= #{:w2} (r/equivocators
+                     (with {:inga.evidence/witness :w2
+                            :inga.evidence/vote-a (v 7 3 "a")
+                            :inga.evidence/vote-b (v 7 3 "b")})))
+          "a real same-view double-vote must still be reported"))))
