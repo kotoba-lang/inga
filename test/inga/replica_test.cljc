@@ -1452,3 +1452,32 @@
         "a healthy replica's tip IS its highest certificate — anything else
          means this is silently rewriting chains in the ordinary case")
     (is (= (r/height s) (:inga.block/height b)))))
+
+(deftest new-views-are-a-window-not-a-history
+  (testing "A replica sends a new-view every time it times out, so on a
+            stalled chain this map grew by one entry roughly every one and a
+            half seconds, forever, each entry holding every witness that spoke
+            for that view. In a Durable Object — a long-lived process with a
+            memory ceiling — that is a leak with a clock on it, and
+            `can-justify-skip?` scans the map on every `propose`.
+
+            Measured: a replica ran thousands of blocks, then answered 1101,
+            then stopped answering at all."
+    (let [rs (run)
+          [w s] (first (sort-by key rs))
+          ;; Many views, from every peer, the way a stalled chain produces them.
+          fed (reduce (fn [st v]
+                        (reduce (fn [st peer]
+                                  (first (r/on-message
+                                          st {:type :new-view :witness peer
+                                              :view v :high-qc nil}
+                                          (+ 50000 v))))
+                                st
+                                (remove #(= % w) (sort (keys rs)))))
+                      s
+                      (range 1000 1600))]
+      (is (<= (count (:new-views fed)) (* 2 r/keep-views))
+          (str "new-views held " (count (:new-views fed))
+               " entries — it is unbounded"))
+      (is (pos? (count (:new-views fed)))
+          "pruned everything, which would take the skip evidence with it"))))

@@ -628,6 +628,14 @@
   breaks a real deadlock promptly."
   32)
 
+(def ^:const keep-views
+  "How many views of new-views to remember. **64.**
+
+  A bound, and the number is not delicate: what matters is that one exists.
+  Far enough back that a replica whose messages are late still counts, small
+  enough that the structure stays a window instead of a history."
+  64)
+
 (def ^:const max-drop
   "The most blocks one rebuild may discard. **4.**
 
@@ -1313,6 +1321,30 @@
             state (update-in state [:new-views view] (fnil assoc {}) witness
                              {:inga.nv/witness witness :inga.nv/view view
                               :inga.nv/high-qc high-qc})
+            ;; And forget the old ones.
+            ;;
+            ;; This map had no bound at all. A replica sends a new-view every
+            ;; time it times out, so on a stalled chain it grew by one entry
+            ;; roughly every one and a half seconds, forever — each entry a map
+            ;; of every witness that spoke for that view. In a Durable Object,
+            ;; which is a long-lived process with a memory ceiling, that is a
+            ;; leak with a clock on it.
+            ;;
+            ;; It became a CPU cost too: `can-justify-skip?` scans this map on
+            ;; every `propose`, and `propose` now runs on every tick. Measured:
+            ;; a replica ran for thousands of blocks and then stopped answering
+            ;; entirely — 1101, then no response at all.
+            ;;
+            ;; A view far below the current one can justify nothing that is
+            ;; still wanted. `keep-views` back is enough for a lagging replica
+            ;; whose new-views are still arriving, and the window is what makes
+            ;; this a bounded structure rather than a growing one.
+            state (let [nvs (:new-views state)]
+                    (if (<= (count nvs) (* 2 keep-views))
+                      state
+                      (let [floor (- view keep-views)]
+                        (assoc state :new-views
+                               (into {} (filter (fn [[v _]] (>= v floor)) nvs))))))
             ;; KEEP the certificate. It arrived verified — the guard above ran
             ;; `att/verify-certificate` on it — and it was being thrown away.
             ;;
