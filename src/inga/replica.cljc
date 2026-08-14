@@ -442,11 +442,40 @@
   A replica that has not yet seen the new-views refuses, and the proposer
   re-proposes; the retransmission path already exists because a lost vote
   needed it. That costs a round trip in the worst case and keeps a fabricated
-  timeout certificate out of the block format entirely."
+  timeout certificate out of the block format entirely.
+
+  ## Why it is any view at or above, and not that round exactly
+
+  Rounds live near the HEIGHT — `round-after` derives them from the parent, so
+  they advance one per block. New-views live near the VIEW, because a replica
+  sends one for the view it is entering when it times out. The moment the
+  chain stalls the two numbers separate, and they never come back: the round a
+  proposer wants to claim is around the height, and `[:new-views (dec round)]`
+  at that number is empty because nobody has been in that view for hours.
+
+  So the exact-round form could only ever be satisfied when view and height
+  were already close together — that is, when nothing was wrong. **The skip
+  was structurally unavailable in precisely the situation it exists for.**
+
+  Measured: all four replicas agreed the leader of the next round was w1, and
+  w1 was seven blocks behind and could not catch up. Nobody could take the
+  round from it, and the chain sat there.
+
+  What justifies skipping the base leader is that the network HAS been timing
+  out since the parent — not that it timed out at one particular number. Any
+  view at or above `(dec round)` with a quorum of new-views says exactly that,
+  and both sides of a proposal compute it from their own evidence, so it stays
+  a check and not a claim. The round itself is still derived from the parent,
+  which is what keeps leadership exactly agreed."
   [state round]
   (fn [_]
-    (boolean (pm/timeout-certificate (vec (vals (get-in state [:new-views (dec round)])))
-                                     (:quorum state)))))
+    (let [floor (dec round)
+          q (:quorum state)]
+      (boolean
+       (some (fn [[v nvs]]
+               (and (>= v floor)
+                    (pm/timeout-certificate (vec (vals nvs)) q)))
+             (:new-views state))))))
 
 (defn- round-after
   "The round a proposal extending `justify` is entitled to.
