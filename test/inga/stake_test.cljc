@@ -303,3 +303,51 @@
                  "c" {:amount 0 :roles #{:ordering}}}]
       (is (false? (:met? (stake/quorum-met? #{"a"} bonds ["a" "a" "a" "b" "c"])))
           "a repeated witness is still one witness"))))
+
+(deftest a-view-change-is-not-equivocation
+  (testing "A HotStuff replica votes again at the same HEIGHT in a LATER view
+            — that is what a view change is, and it is exactly what happens
+            when a leader rebuilds on its highest QC after a round failed to
+            certify. Keyed by (witness, height) alone, every one of those
+            re-votes is the objective fingerprint of a Byzantine proposer.
+
+            Measured on the deployed chain: equivocators [w1 w2 w3 w4] — all
+            four replicas of an honest, agreeing network, each holding proofs
+            against every other, with the SAME state root on all four. Nothing
+            had forked. The escape that rescues a stalled chain was
+            manufacturing the evidence that condemns it."
+    (let [v (fn [w h view hash]
+              {:inga.vote/witness w :inga.vote/height h
+               :inga.vote/view view :inga.vote/block-hash hash
+               :inga.vote/sig (str w "-" view)})]
+      (is (empty? (stake/detect-equivocation
+                   [(v :w1 7 3 "a") (v :w1 7 9 "b")]))
+          "a re-vote six views later was called a double-vote")
+
+      (is (= 1 (count (stake/detect-equivocation
+                       [(v :w1 7 3 "a") (v :w1 7 3 "b")])))
+          "two different blocks at the same height IN THE SAME VIEW is the
+           fingerprint and must still be caught")
+
+      (is (empty? (stake/detect-equivocation
+                   [(v :w1 7 3 "a") (v :w2 7 3 "b")]))
+          "different witnesses are not each other's evidence"))))
+
+(deftest evidence-from-a-view-change-does-not-verify
+  (testing "Detection and verification have to agree. A replica keeps recorded
+            evidence, and `verified-equivocations` re-checks it — so a verifier
+            still keyed by (witness, height) would keep condemning honest
+            replicas from proofs already on disk, no matter what detection
+            does now."
+    (let [v (fn [w h view hash]
+              {:inga.vote/witness w :inga.vote/height h
+               :inga.vote/view view :inga.vote/block-hash hash
+               :inga.vote/sig (str w "-" view)})
+          ev (fn [a b] {:inga.evidence/witness :w1 :inga.evidence/height 7
+                        :inga.evidence/vote-a a :inga.evidence/vote-b b})]
+      (is (not (stake/verify-equivocation-evidence
+                (ev (v :w1 7 3 "a") (v :w1 7 9 "b")) (constantly true)))
+          "evidence built from a view change verified as a slashing proof")
+      (is (stake/verify-equivocation-evidence
+           (ev (v :w1 7 3 "a") (v :w1 7 3 "b")) (constantly true))
+          "a real same-view double-vote must still verify"))))

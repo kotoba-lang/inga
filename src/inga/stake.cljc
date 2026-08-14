@@ -284,11 +284,30 @@
   SAME height but a DIFFERENT block-hash — the objective, unambiguous
   double-vote fingerprint. Returns a vector of evidence maps (empty if
   clean), each `{:inga.evidence/witness :inga.evidence/height
-  :inga.evidence/vote-a :inga.evidence/vote-b}`."
+  :inga.evidence/vote-a :inga.evidence/vote-b}`.
+
+  ## Keyed by VIEW as well as height
+
+  Grouping by `(witness, height)` alone calls a legitimate view change a
+  double-vote. HotStuff replicas are supposed to vote again at the same height
+  in a LATER view — that is what a view change is for, and it is exactly what
+  a leader does when it rebuilds on its highest QC after a round failed to
+  certify. Every one of those re-votes looked, to this function, like the
+  objective fingerprint of a Byzantine proposer.
+
+  **Measured on the deployed chain**: `equivocators [w1 w2 w3 w4]` — all four
+  replicas of an honest, agreeing network, every one of them holding proofs
+  against every other. Same state root on all four, so nothing had actually
+  forked. The escape that rescues a stalled chain was manufacturing the
+  evidence that condemns it.
+
+  Same view, same height, different block is still the fingerprint, and it is
+  still objective: nothing legitimate produces it."
   [votes]
   (->> votes
-       (group-by (juxt :inga.vote/witness :inga.vote/height))
-       (mapcat (fn [[[witness height] group]]
+       (group-by (juxt :inga.vote/witness :inga.vote/height
+                       #(:inga.vote/view % 0)))
+       (mapcat (fn [[[witness height _view] group]]
                  (let [distinct-hashes (distinct (map :inga.vote/block-hash group))]
                    (when (> (count distinct-hashes) 1)
                      (let [a (first group)
@@ -310,11 +329,19 @@
   two votes must actually differ in `:inga.vote/block-hash` while sharing
   `:inga.vote/witness`/`:inga.vote/height` (re-checked here, not just
   trusted from `detect-equivocation`, so a caller can also verify evidence
-  submitted by someone else without re-running detection)."
+  submitted by someone else without re-running detection).
+
+  The VIEW is re-checked here too, and it has to be: `detect-equivocation`
+  stopping at (witness, height) was what condemned four honest replicas, and
+  a verifier that kept the old rule would keep condemning them from evidence
+  already recorded. A pair that differs in view is a view change, which is
+  what HotStuff replicas are supposed to do, and it must not verify as
+  evidence against anybody."
   [{:inga.evidence/keys [witness height vote-a vote-b]} verify-sig-fn]
   (boolean
    (and (= witness (:inga.vote/witness vote-a) (:inga.vote/witness vote-b))
         (= height (:inga.vote/height vote-a) (:inga.vote/height vote-b))
+        (= (:inga.vote/view vote-a 0) (:inga.vote/view vote-b 0))
         (not= (:inga.vote/block-hash vote-a) (:inga.vote/block-hash vote-b))
         (verify-sig-fn vote-a)
         (verify-sig-fn vote-b))))
