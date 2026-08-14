@@ -192,14 +192,31 @@
   "Enter the view a TC certifies. A replica that was behind jumps forward
   rather than working through the views it missed one timeout at a time —
   which is what a partitioned replica would otherwise have to do, taking as
-  long to catch up as it was away."
+  long to catch up as it was away.
+
+  ## The failure count is NOT reset here
+
+  A timeout certificate is evidence that a view FAILED — it is made of
+  new-views, which are what replicas send when they give up. Resetting the
+  backoff on one is resetting it on failure, and it made the backoff
+  unreachable in exactly the situation it exists for: when a chain is stuck,
+  all the replicas time out together every view, so a TC forms every view, so
+  `failures` returned to zero every view and `timeout-for` always answered
+  `base-timeout`.
+
+  **Measured**: ten minutes of a stalled chain with the view climbing at a
+  perfectly constant 0.62 per second, never decelerating, while the height did
+  not move at all. An exponential backoff that never backs off.
+
+  `on-progress` is where it resets, and its docstring already says why: a
+  round produced a certified BLOCK. That is progress. This is not."
   [state tc now params]
-  (let [view (inc (:inga.tc/view tc))]
+  (let [view (inc (:inga.tc/view tc))
+        failures (:failures state 0)]
     (-> state
         (assoc :view (max (:view state) view))
         (on-qc (:inga.tc/high-qc tc))
-        (assoc :failures 0)
-        (assoc :deadline (+ now (timeout-for 0 params))))))
+        (assoc :deadline (+ now (timeout-for failures params))))))
 
 (defn enter-at-least
   "Raise the view to `view` if it is behind. Monotone, like every other view
@@ -208,9 +225,12 @@
   For the one caller that knows a view was reached without having a message
   that says so: a replica replaying its own chain. A block carries the round
   it was proposed in, and a certified block proves a quorum was at that view,
-  so a replica holding it is behind if its own view is lower."
+  so a replica holding it is behind if its own view is lower.
+
+  Raising the view is not progress either, so the failure count survives it
+  for the same reason it survives a timeout certificate."
   [state view]
-  (cond-> state (> view (:view state)) (assoc :view view :failures 0)))
+  (cond-> state (> view (:view state)) (assoc :view view)))
 
 (defn on-progress
   "A round produced a certified block. The failure count resets, which is what

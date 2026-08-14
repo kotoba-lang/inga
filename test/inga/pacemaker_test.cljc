@@ -119,13 +119,22 @@
 
 (deftest a-tc-jumps-a-lagging-replica-forward
   (testing "otherwise a partitioned replica takes as long to catch up as it was away"
-    (let [behind (pm/initial :w4)
+    (let [behind (assoc (pm/initial :w4) :failures 5)
           tc {:inga.tc/view 40 :inga.tc/witnesses #{:w1 :w2 :w3}
               :inga.tc/high-qc (qc 39 39 "b39")}
           s (pm/on-timeout-certificate behind tc 0 params)]
       (is (= 41 (:view s)) "one step, not forty")
       (is (= 39 (pm/qc-view (:locked-qc s))) "and it adopts what it missed")
-      (is (= 0 (:failures s))))))
+      (is (= 5 (:failures s))
+          "a timeout certificate is made of new-views — it is evidence that a
+           view FAILED, and resetting the backoff on it resets the backoff on
+           failure. A stuck chain forms one every view, so the exponential
+           backoff never engaged: measured at a perfectly constant 0.62 views
+           per second for ten minutes while the height did not move.
+           `on-progress` is where it resets, on a certified block.")
+      (is (= (pm/timeout-for 5 params) (- (:deadline s) 0))
+          "and the deadline it sets has to use that count, or carrying it
+           forward changes nothing"))))
 
 (deftest entering-a-view-never-moves-backwards
   (let [ahead (assoc (pm/initial :w1) :view 100)
