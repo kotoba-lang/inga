@@ -557,16 +557,121 @@
       reached
       base)))
 
+(defn high-qc-block
+  "The highest block in this replica's own chain that it holds a certificate
+  for, and how many blocks sit above it uncertified.
+
+  Returns `[block dropped]`. `dropped` is 0 in the ordinary case, where the
+  tip is certified and this is the tip.
+
+  ## Why a leader must build here and not on its tip
+
+  A proposal that misses quorum leaves an uncertified block at the top of the
+  proposer's own chain. If the leader may only extend a CERTIFIED tip, then
+  from that moment on no leader can ever propose again: the block cannot be
+  certified without votes, the replicas that never received it cannot vote for
+  it, and every future round refuses with `no-certificate-for-the-tip`. The
+  views race ahead of the height forever.
+
+  The deployed chain did sit at heights 26110/26109/26110/26102 with
+  `votes-for-tip 2` while the views climbed past 26800. **This is NOT proven
+  to be the cause of that stall**, and saying so would be the kind of claim
+  this repository keeps having to retract: three separate harnesses were
+  written to reproduce it and the network recovered in all three with this
+  change reverted. What that chain actually shows is
+  `last-proposal {:height 26102 :outcome :not-the-leader}` on a replica whose
+  height is 26109 — proposals refused for leadership, with the blocks arriving
+  by sync afterwards. See `my-turn?`.
+
+  This change stands on its own: extending the highest QC is HotStuff's rule,
+  and requiring a certified TIP is provably not live. It is not a fix for a
+  stall it has never been shown to end.
+
+  HotStuff's leader extends its highest QC, which is exactly this. The
+  uncertified suffix is dropped, and dropping it is safe because nothing in it
+  was ever certified — no replica can have committed any of it, since a commit
+  needs three chained certificates and these blocks have none. Safety does not
+  come from refusing to discard uncertified work; it comes from
+  `pacemaker/safe-to-vote?`, which is untouched here.
+
+  ## But not eagerly
+
+  In chained HotStuff an uncertified tip is the NORMAL state for a moment:
+  the certificate for a block forms as its votes arrive, so between proposing
+  and collecting there is always a window where the tip has no QC. A leader
+  that walked back on sight of one would re-propose a block that was about to
+  be certified anyway, and fork its own chain every round.
+
+  That is not a hypothesis — it is what the first version of this did.
+  `a-departure-is-not-an-eviction` came back with heights
+  `[222 222 222 216 216 222 222]`: two replicas six blocks behind, from
+  truncation that happened while the votes were still in flight.
+
+  So the walk-back is bounded by a floor: this never returns a block below the
+  committed height, since a committed block is one somebody may already have
+  answered a query from."
+  [state]
+  (let [chain (:chain state)
+        qcs (:qcs state)
+        hash-fn (:hash-fn state)
+        floor (committed-height state)]
+    (loop [i (dec (count chain))]
+      (cond
+        ;; Genesis has no certificate and is the floor: a chain that walked
+        ;; past it would have nothing to build on at all.
+        (<= i 0) [(nth chain 0) (max 0 (dec (count chain)))]
+        (get qcs (hash-fn (nth chain i))) [(nth chain i) (- (dec (count chain)) i)]
+        ;; Never below what was committed.
+        (<= (:inga.block/height (nth chain i)) floor)
+        [(nth chain i) (- (dec (count chain)) i)]
+        :else (recur (dec i))))))
+
+(def ^:const stall-views
+  "How many views a tip may stay uncertified before a leader stops waiting for
+  it and rebuilds on its highest certificate. **4.**
+
+  Small enough that a real stall is broken in seconds, and larger than the
+  ordinary window in which a tip is uncertified because its votes are still
+  arriving. Zero would be `high-qc-block` applied eagerly, which forks the
+  chain every round; unbounded is the deadlock this exists to end."
+  4)
+
+(defn stalled-on-an-uncertified-tip?
+  "Has this replica been unable to certify its own tip for long enough that
+  waiting is no longer the right answer?
+
+  The measure is views, not time: a view change IS the network saying it gave
+  up on a round, so counting them counts failed attempts rather than
+  wall-clock, and it needs no clock to be comparable across replicas."
+  [state]
+  (let [t (tip state)]
+    (and (not (get (:qcs state) ((:hash-fn state) t)))
+         (>= (- (:view (:pm state) 0) (:inga.block/round t 0)) stall-views))))
+
 (defn- propose
-  "Build the next block on the tip, if this replica leads that height and
-  holds a certificate for the tip. Returns `[state' outbox]`.
+  "Build the next block on the highest certified block, if this replica leads
+  that height. Returns `[state' outbox]`.
 
   The QC requirement is the whole point: a proposal carries the certificate
   for its parent, so a replica receiving it can check that the parent was
   certified rather than merely named. Proposing without one would be
-  proposing a chain nobody agreed to."
+  proposing a chain nobody agreed to.
+
+  What it does NOT mean is that the parent has to be the tip — see
+  `high-qc-block` for the stall that reading cost."
   [state now]
-  (let [t (tip state)
+  (let [[t dropped] (if (stalled-on-an-uncertified-tip? state)
+                      (high-qc-block state)
+                      [(tip state) 0])
+        ;; The uncertified suffix goes. Keeping it would leave this replica
+        ;; building a block whose parent is not its own tip, and
+        ;; `extend-chain` would then silently refuse to adopt the block this
+        ;; replica had just proposed itself.
+        state (if (pos? dropped)
+                (-> state
+                    (update :chain subvec 0 (- (count (:chain state)) dropped))
+                    (update :dropped-uncertified (fnil + 0) dropped))
+                state)
         h (inc (:inga.block/height t))
         parent-hash ((:hash-fn state) t)
         justify (get (:qcs state) parent-hash)]
@@ -1025,10 +1130,17 @@
   Leaving this out made the leader the only replica that could certify
   anything — it was the only one holding every other replica's vote — and it
   never advanced its own chain, so it re-proposed the same height forever
-  while the rest of the network waited for a proposal that already existed."
+  while the rest of the network waited for a proposal that already existed.
+
+  Gated by VIEW, like `handle-proposal` — this was the last place still
+  gating by HEIGHT, and the two rules disagree exactly when it matters. A
+  leader rebuilding on its highest QC after a failed round proposes at the
+  same height again, and the height gate made it refuse to vote for the block
+  it had just built: the one vote guaranteed to exist was the one that was
+  never cast."
   [state b now]
   (let [state (-> state (remember-block b) (extend-chain b))]
-    (if (voted? state (:inga.block/height b))
+    (if (<= (:view (:pm state)) (voted-view state))
       [state []]
       (cast-vote state b now))))
 

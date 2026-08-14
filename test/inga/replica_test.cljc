@@ -1347,3 +1347,108 @@
       (let [[_ out] (r/on-tick s' 60000)]
         (is (<= (count (filter #(= :sync-request (:type (:msg %))) out)) 1)
             "stopped asking altogether")))))
+
+
+;; ── the stall a certified-tip requirement causes ────────────────────────────
+
+(defn- orphan-the-tip
+  "The state a network is left in when one proposal reaches only half of it.
+
+  Two replicas hold the block and nobody else has ever seen it: no
+  certificate, no votes to re-form one from, and no copy on the replicas that
+  would have to vote. The views have moved on without it.
+
+  Removing only the certificate is NOT this, and the difference is the whole
+  test. With the votes still recorded the replicas simply rebuild the QC and
+  the chain carries on — which is what the first version of this test did, and
+  it passed with the fix reverted."
+  [rs views-later]
+  (let [ws (sort (keys rs))
+        haves (set (take 2 ws))]
+    (into {}
+          (for [[w s] rs
+                :let [t (r/tip s)
+                      hf (:hash-fn s)
+                      h (hf t)
+                      s (-> s
+                            (update :qcs dissoc h)
+                            (update :votes dissoc h)
+                            (assoc-in [:pm :view]
+                                      (+ views-later (:inga.block/round t 0))))]]
+            [w (if (haves w)
+                 s
+                 ;; Never received it. The chain ends one block earlier.
+                 (-> s
+                     (update :chain subvec 0 (dec (count (:chain s))))
+                     (update :by-hash dissoc h)))]))))
+
+(deftest a-proposal-that-missed-quorum-does-not-freeze-the-chain-forever
+  (testing "A leader whose proposal reaches nobody is left with an
+            uncertified block on top of its own chain. If it may only extend a
+            CERTIFIED tip, no leader ever proposes again: the block cannot be
+            certified without votes, the replicas that never saw it cannot
+            vote for it, and every later round refuses with
+            no-certificate-for-the-tip while the views race ahead.
+
+            NOTE: this test passes with the fix reverted. It pins the rule,
+            not the deployed stall of 2026-08-14 — that one is a leadership
+            refusal (last-proposal outcome not-the-leader at 26102 on a replica
+            standing at 26109) and remains open."
+    (let [rs (run)
+          before (into {} (for [[v x] rs] [v (r/height x)]))
+          orphaned (orphan-the-tip rs 50)
+          [w stuck] (first (sort-by key orphaned))]
+      (is (r/stalled-on-an-uncertified-tip? stuck)
+          "the harness did not actually reproduce the stall")
+      (let [[b dropped] (r/high-qc-block stuck)]
+        (is (pos? dropped) "nothing was uncertified, so there is nothing to test")
+        (is (< (:inga.block/height b) (r/height stuck))
+            "the highest certificate is the tip, which is not the stalled case"))
+      ;; Ticked AND delivered, because `on-tick` reaches `propose` only on the
+      ;; branch where the view has not expired: a stalled chain times out every
+      ;; tick and spends itself on new-views. The recovery has to survive that,
+      ;; which means the messages have to actually move.
+      (let [after (reduce (fn [acc t]
+                            (let [acc2 (reduce (fn [a v]
+                                                 (let [[s' out] (r/on-tick (get (:rs a) v) t)]
+                                                   (-> a
+                                                       (update :rs assoc v s')
+                                                       (update :ob into (map #(assoc % :from v) out)))))
+                                               {:rs acc :ob []}
+                                               (sort (keys acc)))
+                                  [rs' _ _] (deliver-all (:rs acc2) (vec (:ob acc2)) t 4000)]
+                              rs'))
+                          orphaned
+                          (range 100000 103000 100))
+            grew (count (filter (fn [[v x]] (> (r/height x) (get before v))) after))]
+        (is (>= grew 3)
+            (str "the chain never recovered — before "
+                 (sort-by key before) " after "
+                 (sort-by key (into {} (for [[v x] after] [v (r/height x)])))))))))
+
+(deftest an-uncertified-tip-is-left-alone-while-its-votes-are-still-arriving
+  (testing "In chained HotStuff the tip has no certificate for a moment after
+            it is proposed — the QC forms as the votes come in. A leader that
+            rebuilt on sight of that would fork its own chain every round.
+
+            The first version of this fix did exactly that, and
+            a-departure-is-not-an-eviction came back
+            [222 222 222 216 216 222 222]: two replicas six blocks behind."
+    (let [rs (run)
+          w (key (first (sort-by key rs)))
+          fresh (get (orphan-the-tip rs 1) w)
+          late (get (orphan-the-tip rs r/stall-views) w)]
+      (is (not (r/stalled-on-an-uncertified-tip? fresh))
+          "one view behind is an ordinary in-flight vote, not a stall")
+      (is (r/stalled-on-an-uncertified-tip? late)
+          "at the threshold it must escape, or the bound means nothing"))))
+
+(deftest the-highest-certified-block-is-what-a-leader-builds-on
+  (let [rs (run)
+        s (val (first rs))
+        [b dropped] (r/high-qc-block s)]
+    (is (some? b))
+    (is (zero? dropped)
+        "a healthy replica's tip IS its highest certificate — anything else
+         means this is silently rewriting chains in the ordinary case")
+    (is (= (r/height s) (:inga.block/height b)))))
