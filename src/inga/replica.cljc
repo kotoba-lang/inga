@@ -549,12 +549,38 @@
   **This is the half that closes the fault-tolerance gap.** Accepting a
   skipped round (see `proposed-by-its-leader?`) does nothing on its own if no
   proposer ever claims one: leadership would still sit on the round a
-  departed witness leads, which is the stall `departure-test` pins."
+  departed witness leads, which is the stall `departure-test` pins.
+
+  ## One round at a time, not all the way to the view
+
+  The skip used to jump straight to `(:view (:pm state))` — the proposer's own
+  current view. That number is private: each replica times out on its own
+  clock, so the round a proposer claims is essentially its personal view
+  counter, and the receiver has to independently hold a quorum of new-views
+  for exactly `claimed - 1` to accept it. While the views are racing, that
+  evidence almost never lines up, so every proposal is refused
+  `not-the-leader`, no block is certified, the views race further, and the gap
+  that caused it grows.
+
+  **Measured on the deployed chain**, all four replicas at once, none of them
+  believing it was their turn:
+
+      w1  claims round 26945, says w2 leads it
+      w2  claims round 26704, says w1 leads it
+      w1  why-not-proposing: leader-of-next w4
+      w2  why-not-proposing: leader-of-next w3
+
+  Advancing ONE round per proposal keeps the round near the height, where
+  every replica derives the same leader from the same parent. A departed
+  leader still gets skipped — that is what `departure-test` pins — it just
+  takes a round to do it instead of an unbounded jump to a number only the
+  proposer knows."
   [state parent]
   (let [base (round-after parent)
-        reached (:view (:pm state) base)]
-    (if (and (> reached base) ((can-justify-skip? state reached) reached))
-      reached
+        reached (:view (:pm state) base)
+        step (min reached (inc base))]
+    (if (and (> step base) ((can-justify-skip? state step) step))
+      step
       base)))
 
 (defn high-qc-block
