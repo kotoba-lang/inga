@@ -1511,3 +1511,103 @@
             ahead (+ 2 (:inga.block/round (r/tip s) 0))]
         (is (not ((#'inga.replica/can-justify-skip? healthy ahead) ahead))
             "a healthy replica skipped a round nobody had failed")))))
+
+
+;; ── the deployed stall, reproduced ──────────────────────────────────────────
+
+(defn- converged-and-short-of-quorum
+  "The state the deployed chain sits in when it stops.
+
+  Every replica holds the SAME tip, that tip has no certificate, and the votes
+  recorded for it are one short of quorum. The replicas that did vote are
+  re-sending; the ones that did not are the whole problem. The views are far
+  past the tip's round, which is what a stalled chain does — it times out, and
+  timing out is the only thing that moves a view.
+
+  Nothing is missing from anybody's chain, so sync has nothing to repair. That
+  is what distinguishes this from every earlier harness here: those left a
+  replica BEHIND, and being behind is recoverable — a peer sends the block.
+  Here everyone already has it and simply will not vote.
+  `uncertified` is how many blocks at the top have no certificate. More than
+  one, because a stalled chain does not stop after a single failed round — it
+  keeps proposing and failing, and each attempt leaves another uncertified
+  block on top. The deployed chain refused with `no-certificate-for-the-tip`
+  while holding several."
+  [rs keep-votes views-ahead uncertified]
+  (let [ws (sort (keys rs))
+        voters (set (take keep-votes ws))]
+    (into {}
+          (for [[w s] rs
+                :let [t (r/tip s)
+                      hf (:hash-fn s)
+                      h (hf t)
+                      chain (:chain s)
+                      tops (map hf (take-last uncertified chain))
+                      view (+ views-ahead (:inga.block/round t 0))]]
+            [w (-> s
+                   (update :qcs #(apply dissoc % tops))
+                   ;; Only `keep-votes` of them ever voted for the tip.
+                   (update-in [:votes h] #(select-keys (or % {}) voters))
+                   (assoc-in [:pm :view] view)
+                   ;; And they have all spent this view, which is what
+                   ;; `already-voted-in-this-view` means on the deployed chain.
+                   (assoc :voted-view view))]))))
+
+(deftest four-replicas-holding-one-uncertified-block-recover
+  (testing "SPECIFICATION — a chain whose every replica holds the same block,
+            one vote short of certifying it, must not stay there.
+
+            This is the shape the deployed venue stops in, measured after nine
+            separate consensus fixes: all four at height 52364, tip-certified
+            false, votes-for-tip 2 of a quorum of 3, already-voted-in-this-view
+            on every replica, views 597 past the height, unmoved for eight
+            minutes.
+
+            Every earlier harness in this file recovered because it left a
+            replica BEHIND, and behind is repairable — a peer sends the block.
+            Nothing is missing here. The block is on every chain and the votes
+            that would certify it are the ones that will not be cast."
+    (let [rs (run)
+          before (into {} (for [[w s] rs] [w (r/height s)]))
+          q (c/quorum-size (count rs))
+          stuck (converged-and-short-of-quorum rs (dec q) 400 6)
+          after (reduce (fn [acc t]
+                          (let [step (reduce (fn [a v]
+                                               (let [[s2 out] (r/on-tick (get (:rs a) v) t)]
+                                                 (-> a
+                                                     (update :rs assoc v s2)
+                                                     (update :ob into (map #(assoc % :from v) out)))))
+                                             {:rs acc :ob []}
+                                             (sort (keys acc)))
+                                [rs2 _ _] (deliver-all (:rs step) (vec (:ob step)) t 4000)]
+                            rs2))
+                        stuck
+                        (range 200000 206000 100))
+          grew (count (filter (fn [[v x]] (> (r/height x) (get before v))) after))]
+      (is (>= grew 3)
+          (str "the chain never left the block it was stuck on — before "
+               (sort-by key before) " after "
+               (sort-by key (into {} (for [[v x] after] [v (r/height x)]))))))))
+
+(deftest high-qc-block-never-answers-with-an-uncertified-block
+  (testing "`propose` needs a certificate for the parent to justify a
+            proposal. Handed a block without one it TRUNCATED the chain to
+            that block and then refused anyway with
+            no-certificate-for-the-tip — discarding blocks on every round and
+            producing nothing.
+
+            Probed with six uncertified blocks on top: it answered with a
+            block whose certificate did not exist. On the deployed chain that
+            is a leader all four replicas agree on, refusing forever."
+    (let [rs (run)
+          s (val (first (sort-by key rs)))
+          hf (:hash-fn s)
+          tops (map hf (take-last 6 (:chain s)))
+          stripped (update s :qcs #(apply dissoc % tops))
+          [b dropped] (r/high-qc-block stripped)]
+      (is (or (get (:qcs stripped) (hf b)) (zero? dropped))
+          "returned a block with no certificate AND asked for a truncation —
+           the chain is shortened and the proposal still cannot be made")
+      (when (pos? dropped)
+        (is (get (:qcs stripped) (hf b))
+            "a drop was requested toward a block that cannot justify anything")))))

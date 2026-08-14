@@ -722,23 +722,44 @@
 
   So the walk-back is bounded by a floor: this never returns a block below the
   committed height, since a committed block is one somebody may already have
-  answered a query from."
+  answered a query from.
+
+  ## It only ever returns a block it holds a certificate for
+
+  It used to return whatever it landed on when the walk hit its floor — and a
+  block with no certificate is useless to `propose`, which needs one to
+  justify the proposal. The result was the worst of both: `propose` TRUNCATED
+  the chain to that block and then refused anyway with
+  `no-certificate-for-the-tip`. Every round. Blocks discarded on each attempt,
+  and no proposal to show for it.
+
+  Probed directly: with six uncertified blocks on top, this answered with a
+  block whose `returned-block-has-qc?` was false. On the deployed chain that
+  is `propose-refusal no-certificate-for-the-tip` on a leader that all four
+  replicas agreed was the leader — measured, unmoved.
+
+  So when there is no certified block within reach it says so by returning the
+  tip and a drop of zero: no escape is available, `propose` refuses exactly as
+  it would have, and nothing is thrown away for nothing."
   [state]
   (let [chain (:chain state)
         qcs (:qcs state)
         hash-fn (:hash-fn state)
         floor (committed-height state)
-        stop (max 0 (- (count chain) 1 max-drop))]
+        stop (max 0 (- (count chain) 1 max-drop))
+        tip-b (peek chain)]
     (loop [i (dec (count chain))]
       (cond
-        ;; Genesis has no certificate and is the floor: a chain that walked
-        ;; past it would have nothing to build on at all.
-        (<= i 0) [(nth chain 0) (max 0 (dec (count chain)))]
-        (get qcs (hash-fn (nth chain i))) [(nth chain i) (- (dec (count chain)) i)]
-        ;; Never below what was committed, and never more than `max-drop`.
-        (or (<= (:inga.block/height (nth chain i)) floor)
-            (<= i stop))
+        ;; Nothing certified within reach — say so rather than hand back a
+        ;; block that cannot justify anything.
+        (or (<= i 0)
+            (< (:inga.block/height (nth chain i)) floor)
+            (< i stop))
+        [tip-b 0]
+
+        (get qcs (hash-fn (nth chain i)))
         [(nth chain i) (- (dec (count chain)) i)]
+
         :else (recur (dec i))))))
 
 (defn stalled-on-an-uncertified-tip?
