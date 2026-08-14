@@ -210,7 +210,15 @@
         resumed (r/resume (opts w) (r/snapshot s))
         [_ out] (r/on-tick resumed 9999)
         tip-hash (hash-fn (r/tip resumed))]
-    (doseq [[vh vhash] (votes-out out)]
+    ;; Only votes AT the resumed height are the subject. A restarted replica
+    ;; that also leads the next round proposes and votes for its own new
+    ;; block, which is `adopt-own` doing its job — the leader is the one
+    ;; replica guaranteed to hold every other's vote, and a leader that does
+    ;; not vote for its own block never certifies it. That vote is at a height
+    ;; this replica has never voted at, so it is not the thing this test is
+    ;; about.
+    (doseq [[vh vhash] (votes-out out)
+            :when (<= vh (r/height resumed))]
       (is (= vh (r/height resumed)))
       (is (= vhash tip-hash)
           "a restarted replica voted for a block that is not its own tip"))))

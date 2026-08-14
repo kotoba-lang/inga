@@ -1729,7 +1729,23 @@
               state' (cond-> state'
                        ask (assoc :last-sync-ask (:view (:pm state'))
                                   :last-sync-ask-at now))]
-          [state' (into (into [{:to :all :msg msg}] (vec ask)) out)]))
+          ;; And then try to propose anyway.
+          ;;
+          ;; This branch used to RETURN here, and that is the reason a stalled
+          ;; chain could not restart itself. On a stalled chain the deadline
+          ;; expires on every tick, so this branch is the only one that ever
+          ;; runs — and `propose` lives in the other one. The leader was never
+          ;; asked. Measured: w3 designated leader by all four replicas, its
+          ;; tip uncertified with two votes, `propose-refusal` NULL — not a
+          ;; refusal, no call at all — while the views climbed 400 past the
+          ;; height.
+          ;;
+          ;; Nothing is forced: `propose` refuses unless this replica leads
+          ;; the round its parent entitles it to and the block interval has
+          ;; passed. What changes is that it gets to answer.
+          (let [[state'' pout] (propose state' now)]
+            [state'' (into (into (into [{:to :all :msg msg}] (vec ask)) out)
+                           pout)])))
       ;; An uncertified tip is the one state a tick can fix and used not to.
       ;;
       ;; `vote-on-tip` was reachable only from `handle-sync-response`, and only
