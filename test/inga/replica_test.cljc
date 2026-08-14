@@ -1481,3 +1481,33 @@
                " entries — it is unbounded"))
       (is (pos? (count (:new-views fed)))
           "pruned everything, which would take the skip evidence with it"))))
+
+(deftest a-behind-leader-can-be-skipped-without-recent-new-views
+  (testing "The backoff exists to make replicas time out LESS often, and the
+            skip evidence used to be a quorum of new-views — so the two
+            cancelled. Once the backoff engaged, new-views stopped
+            accumulating, nothing could be skipped, and a leader that was
+            behind held its round with the whole chain stopped behind it.
+
+            Measured right after the backoff went live: w3 seven blocks back
+            holding the next round, every other replica certified and idle.
+
+            A replica's own view being past the round says the leader failed
+            without anybody needing to have spoken recently."
+    (let [rs (run)
+          s (val (first (sort-by key rs)))
+          ;; No new-views at all, and a view well past the tip's round.
+          quiet (-> s
+                    (assoc :new-views {})
+                    (assoc-in [:pm :view]
+                              (+ 40 (:inga.block/round (r/tip s) 0))))
+          round (+ 2 (:inga.block/round (r/tip quiet) 0))]
+      (is (empty? (:new-views quiet)) "the harness left evidence behind")
+      (is ((#'inga.replica/can-justify-skip? quiet round) round)
+          "a stalled replica with no recent new-views could not skip anybody")
+      ;; And the healthy case must still refuse: view tracking the round means
+      ;; base+1 is ahead of it.
+      (let [healthy (assoc-in s [:pm :view] (:inga.block/round (r/tip s) 0))
+            ahead (+ 2 (:inga.block/round (r/tip s) 0))]
+        (is (not ((#'inga.replica/can-justify-skip? healthy ahead) ahead))
+            "a healthy replica skipped a round nobody had failed")))))

@@ -466,16 +466,39 @@
   view at or above `(dec round)` with a quorum of new-views says exactly that,
   and both sides of a proposal compute it from their own evidence, so it stays
   a check and not a claim. The round itself is still derived from the parent,
-  which is what keeps leadership exactly agreed."
+  which is what keeps leadership exactly agreed.
+
+  ## Or simply: this replica's own view is past the round
+
+  Counting new-views made the evidence depend on their VOLUME, and the
+  backoff exists to reduce exactly that. The two fixes cancelled: once the
+  backoff engaged, replicas stopped timing out often, so quorums of new-views
+  stopped accumulating, so nothing could be skipped — and a leader that was
+  behind held its round with the chain stopped behind it. Measured directly
+  after deploying the backoff: w3 seven blocks back, holding the next round,
+  every other replica certified and idle.
+
+  A replica's own view being at or past the round says the same thing without
+  needing anybody to have spoken recently: views only advance on timeouts, so
+  a view past round R IS this replica having given up on R. Both sides of a
+  proposal check their own, and `proposable-round` claims at most one round
+  past the parent, so what is being agreed is a single step and not a jump to
+  a number one side invented.
+
+  During healthy operation the view tracks the round, so `base + 1` is ahead
+  of it and the skip is refused — which is the behaviour that has to be
+  preserved, and is what keeps leadership on the parent's round when nothing
+  is wrong."
   [state round]
   (fn [_]
     (let [floor (dec round)
           q (:quorum state)]
-      (boolean
-       (some (fn [[v nvs]]
-               (and (>= v floor)
-                    (pm/timeout-certificate (vec (vals nvs)) q)))
-             (:new-views state))))))
+      (or (>= (:view (:pm state) 0) round)
+          (boolean
+           (some (fn [[v nvs]]
+                   (and (>= v floor)
+                        (pm/timeout-certificate (vec (vals nvs)) q)))
+                 (:new-views state)))))))
 
 (defn- round-after
   "The round a proposal extending `justify` is entitled to.
