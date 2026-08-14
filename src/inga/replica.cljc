@@ -1819,9 +1819,32 @@
           ;; Nothing is forced: `propose` refuses unless this replica leads
           ;; the round its parent entitles it to and the block interval has
           ;; passed. What changes is that it gets to answer.
-          (let [[state'' pout] (propose state' now)]
-            [state'' (into (into (into [{:to :all :msg msg}] (vec ask)) out)
-                           pout)])))
+          ;; A tip nobody has certified, on a chain that only ever runs this
+          ;; branch.
+          ;;
+          ;; `vote-on-tip` exists for exactly this and lived only in the
+          ;; ordinary branch, which a stalled chain never reaches — its
+          ;; deadline expires every tick. So the one function written to
+          ;; rescue an uncertified tip was unreachable precisely when it was
+          ;; needed.
+          ;;
+          ;; NARROW, because the wide version broke fault tolerance:
+          ;; calling `vote-on-tip` unconditionally here made every timeout
+          ;; re-send a vote, and `survives-a-departure-that-is-not-the-next-
+          ;; leader` stopped — six of seven replicas present and the height
+          ;; frozen. Only the case that is actually stuck qualifies: the tip
+          ;; has no certificate AND this replica has never voted at that
+          ;; height. A replica that already voted is already counted, and
+          ;; re-sending is what the ordinary branch is for.
+          (let [t (tip state')
+                stuck? (and (not (contains? (:qcs state') ((:hash-fn state') t)))
+                            (pos? (:inga.block/height t 0))
+                            (not (voted? state' (:inga.block/height t))))
+                [sv vout] (if stuck? (vote-on-tip state' now) [state' []])
+                [sp pout] (propose sv now)]
+            [sp (into (into (into (into [{:to :all :msg msg}] (vec ask)) out)
+                            vout)
+                      pout)])))
       ;; An uncertified tip is the one state a tick can fix and used not to.
       ;;
       ;; `vote-on-tip` was reachable only from `handle-sync-response`, and only

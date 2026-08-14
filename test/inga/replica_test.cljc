@@ -1611,3 +1611,107 @@
       (when (pos? dropped)
         (is (get (:qcs stripped) (hf b))
             "a drop was requested toward a block that cannot justify anything")))))
+
+
+;; ── the deployed stall, all five conditions at once ─────────────────────────
+;;
+;; Four earlier harnesses in this file failed to reproduce it, and each failed
+;; the same way: the network recovered, so the test passed with the fix
+;; reverted and proved nothing. What they were missing is the LAST two
+;; conditions below.
+;;
+;; `base-timeout` is 1000 ms and it doubles up to six times, so a stalled
+;; replica's deadline runs out to 64 seconds. Ticking across three seconds —
+;; which is what those harnesses did — leaves the deadline in the future after
+;; the first timeout, so `on-tick` takes the ORDINARY branch, reaches
+;; `vote-on-tip`, and rescues the chain. The deployed chain never gets that:
+;; its deadline expires every tick, so only the timeout branch ever runs, and
+;; `vote-on-tip` lives in the other one.
+;;
+;; So the clock has to move faster than the backoff.
+
+(defn- stalled-exactly-as-deployed
+  "Every one of the five conditions measured on the deployed chain:
+
+    1. every replica holds the SAME tip — sync has nothing to repair
+    2. that tip is uncertified and carries no votes at all
+    3. the replicas that did not vote have spent this view already
+    4. more blocks are uncertified than `max-drop` can walk back over
+    5. (supplied by the caller's clock) the deadline expires on every tick
+    6. no pacemaker still holds a certificate that would hand the chain back
+
+  6 is the one that took five attempts to find. A `new-view` carries the
+  sender's `high-qc`, and `handle-new-view` folds it — so as long as ANY
+  replica's pacemaker still points at a certified block, the timeouts
+  themselves distribute a certificate, `high-qc-block` finds it, and the chain
+  recovers. Every earlier harness left that door open and recovered through
+  it, which is why they passed with the fix reverted and proved nothing."
+  [rs]
+  (let [ws (sort (keys rs))
+        q (c/quorum-size (count rs))
+        voters (set (take (dec q) ws))]
+    (into {}
+          (for [[w s] rs
+                :let [t (r/tip s)
+                      hf (:hash-fn s)
+                      h (hf t)
+                      ;; 4 — deeper than `max-drop`, so `high-qc-block` finds
+                      ;; nothing it can justify a proposal with.
+                      tops (map hf (take-last (+ 2 r/max-drop) (:chain s)))
+                      view (+ 400 (:inga.block/round t 0))]]
+            [w (-> s
+                   (update :qcs #(apply dissoc % tops))
+                   (update-in [:votes h] #(select-keys (or % {}) voters))
+                   ;; Nobody voted for it, and nobody has a record of having
+                   ;; voted. This is the case `vote-on-tip` was written for in
+                   ;; its own words — a block everybody adopted and nobody
+                   ;; voted for — which is what catching up produces, since
+                   ;; adopting is not voting.
+                   ;;
+                   ;; Pruning `:votes` alone was not enough: it left every
+                   ;; replica believing it had already voted at this height, so
+                   ;; no rescue could fire and no rescue could be tested.
+                   (update :voted disj (:inga.block/height t))
+                   (assoc-in [:pm :view] view)
+                   (assoc-in [:pm :deadline] 1)
+                   ;; 6 — and no certificate left to hand anybody.
+                   (assoc-in [:pm :high-qc] nil)
+                   (assoc-in [:pm :locked-qc] nil)
+                   (assoc :voted-view view))]))))
+
+(deftest the-deployed-stall-reproduced
+  (testing "SPECIFICATION — four replicas holding one uncertified block, one
+            vote short, must not stay there.
+
+            Measured on the deployed venue after ten consensus fixes: all four
+            at height 52364, tip-certified false, votes-for-tip 2 of a quorum
+            of 3, already-voted-in-this-view on every replica, views 597 past
+            the height, unmoved for eight minutes.
+
+            This is the harness four earlier attempts did not manage to build.
+            It is expected to FAIL until the tick structure reconciles rescuing
+            a stalled chain with tolerating one failure — see
+            ADR-2800004800 §1. It is committed failing on purpose: a stall
+            nothing reproduces is a stall that comes back."
+    (let [rs (run)
+          before (into {} (for [[w s] rs] [w (r/height s)]))
+          stuck (stalled-exactly-as-deployed rs)
+          ;; 5 — the clock outruns the backoff, so every tick lands in the
+          ;; timeout branch, which is the only branch a stalled chain runs.
+          after (reduce (fn [acc t]
+                          (let [step (reduce (fn [a v]
+                                               (let [[s2 out] (r/on-tick (get (:rs a) v) t)]
+                                                 (-> a
+                                                     (update :rs assoc v s2)
+                                                     (update :ob into (map #(assoc % :from v) out)))))
+                                             {:rs acc :ob []}
+                                             (sort (keys acc)))
+                                [rs2 _ _] (deliver-all (:rs step) (vec (:ob step)) t 4000)]
+                            rs2))
+                        stuck
+                        (range 1000000 3800000 70000))
+          grew (count (filter (fn [[v x]] (> (r/height x) (get before v))) after))]
+      (is (>= grew 3)
+          (str "the chain never left the block it was stuck on — before "
+               (sort-by key before) " after "
+               (sort-by key (into {} (for [[v x] after] [v (r/height x)]))))))))
