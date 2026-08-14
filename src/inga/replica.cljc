@@ -612,6 +612,33 @@
       step
       base)))
 
+(def ^:const stall-views
+  "How many views a tip may stay uncertified before a leader stops waiting for
+  it and rebuilds on its highest certificate. **32.**
+
+  It was 4, and 4 was measured to be actively harmful. Views advance on
+  timeouts, and on the deployed chain they advance about one every one and a
+  half seconds — so 4 views is six seconds, which is inside the ordinary time
+  a block takes to gather votes over HTTP between Durable Objects. The
+  replicas truncated healthy work: heights went DOWN, 26688 to 26678, ten
+  blocks erased in one step, then re-adopted, then erased again.
+
+  The lesson is that a view count is not a duration. 32 views is roughly a
+  minute at the observed rate, which is far outside a normal round and still
+  breaks a real deadlock promptly."
+  32)
+
+(def ^:const max-drop
+  "The most blocks one rebuild may discard. **4.**
+
+  A bound, not a tuning knob. `high-qc-block` walking a long uncertified
+  suffix is correct in principle and catastrophic in practice — it erased ten
+  blocks at once on the deployed chain, blocks that peers were holding and
+  voting on. Dropping the last few is enough to restart a stuck chain: if the
+  suffix is longer, the next round drops a few more, and each step is small
+  enough to be undone by a single sync."
+  4)
+
 (defn high-qc-block
   "The highest block in this replica's own chain that it holds a certificate
   for, and how many blocks sit above it uncertified.
@@ -669,27 +696,19 @@
   (let [chain (:chain state)
         qcs (:qcs state)
         hash-fn (:hash-fn state)
-        floor (committed-height state)]
+        floor (committed-height state)
+        stop (max 0 (- (count chain) 1 max-drop))]
     (loop [i (dec (count chain))]
       (cond
         ;; Genesis has no certificate and is the floor: a chain that walked
         ;; past it would have nothing to build on at all.
         (<= i 0) [(nth chain 0) (max 0 (dec (count chain)))]
         (get qcs (hash-fn (nth chain i))) [(nth chain i) (- (dec (count chain)) i)]
-        ;; Never below what was committed.
-        (<= (:inga.block/height (nth chain i)) floor)
+        ;; Never below what was committed, and never more than `max-drop`.
+        (or (<= (:inga.block/height (nth chain i)) floor)
+            (<= i stop))
         [(nth chain i) (- (dec (count chain)) i)]
         :else (recur (dec i))))))
-
-(def ^:const stall-views
-  "How many views a tip may stay uncertified before a leader stops waiting for
-  it and rebuilds on its highest certificate. **4.**
-
-  Small enough that a real stall is broken in seconds, and larger than the
-  ordinary window in which a tip is uncertified because its votes are still
-  arriving. Zero would be `high-qc-block` applied eagerly, which forks the
-  chain every round; unbounded is the deadlock this exists to end."
-  4)
 
 (defn stalled-on-an-uncertified-tip?
   "Has this replica been unable to certify its own tip for long enough that
