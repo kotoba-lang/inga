@@ -2460,3 +2460,32 @@
 
 (defn committed-height [state]
   (if-let [b (peek (:committed state))] (:inga.block/height b) -1))
+
+(defn lock-state
+  "What this replica is locked on, and what it would need to see to unlock.
+
+  `pacemaker/safe-to-vote?` refuses a proposal that neither extends the lock
+  nor carries a justify from a LATER view than the lock — the two-clause rule,
+  and both clauses are correct. What no instrument answered is which of the
+  two failed, and that is the whole difference between `the leader is on
+  another branch` and `the leader is proposing on a stale certificate`.
+
+  Measured need: the deployed chain sat with `last-proposal :locked-elsewhere`
+  on every replica while the views advanced, and the refusal alone cannot say
+  whether the proposer's certificate was older than the lock or simply
+  elsewhere. One is a leader that has fallen behind; the other is a fork. They
+  want opposite fixes.
+
+  `:high-qc-view` is what this replica would propose on, so a leader whose
+  `:high-qc-view` is below its peers' `:locked-view` is the stale-certificate
+  case, visible by comparing two replicas' answers."
+  [state]
+  (let [pm (:pm state)]
+    {:locked-view (pm/qc-view (:locked-qc pm))
+     :locked-height (:inga.qc/height (:locked-qc pm))
+     :locked-hash (:inga.qc/block-hash (:locked-qc pm))
+     :high-qc-view (pm/qc-view (:high-qc pm))
+     :high-qc-height (:inga.qc/height (:high-qc pm))
+     :tip-height (:inga.block/height (tip state))
+     :tip-round (:inga.block/round (tip state))
+     :view (:view pm)}))
