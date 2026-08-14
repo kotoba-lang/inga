@@ -266,6 +266,10 @@
      ;; Watermark for the heights a `resume` dropped. -1 means "nothing is
      ;; implied", which is what a replica starting at genesis should say.
      :voted-below -1
+     ;; The block this replica's vote in `:voted-view` went to. nil means "no
+     ;; vote in the current view is known about", which refuses more rather
+     ;; than less. See `may-vote?`.
+     :voted-hash nil
      :qcs {}
      ;; first accepted vote per [witness height], and the proofs of anyone who
      ;; sent a second one for a different block
@@ -348,9 +352,21 @@
 
   Monotone: a watermark can only move forward. Restoring an older value than
   the running state already has would re-open a view this replica has already
-  voted in, which is the whole thing it exists to prevent."
-  [state v]
-  (cond-> state (and (integer? v) (> v (voted-view state))) (assoc :voted-view v)))
+  voted in, which is the whole thing it exists to prevent.
+
+  The 3-arity also restores WHAT that vote was for, which is the half
+  `may-vote?` reads. A host that has it should pass it: without it the replica
+  cannot tell a descendant of its own vote from a sibling, so it refuses both
+  until the view moves on. That is one view of lost voting and the safe
+  direction, not a correctness gap."
+  ([state v] (with-voted-view state v nil))
+  ([state v block-hash]
+   (let [ahead? (and (integer? v) (> v (voted-view state)))]
+     (cond-> state
+       ahead? (assoc :voted-view v)
+       ;; Only alongside the view it belongs to — a hash without its view
+       ;; would answer `may-vote?` about a vote cast in some other one.
+       (and ahead? block-hash) (assoc :voted-hash block-hash)))))
 
 (defn voted?
   "Has this replica already voted at `h`?
@@ -384,6 +400,46 @@
       (> n 1024) false                    ; a cycle is a hostile chain, not a long one
       (= hash ((:hash-fn state) b)) true
       :else (recur (get (:by-hash state) (:inga.block/parent-hash b)) (inc n)))))
+
+(defn voted-block
+  "The block this replica voted for in `voted-view`, by hash, or nil.
+
+  The other half of the watermark, and it has to be durable for the same
+  reason the view is: the rule below is one vote per view per BRANCH, and a
+  replica that remembers only the view cannot tell a descendant of its own
+  vote from a sibling of it. `snapshot` carries it. A host that restores the
+  view without it refuses one extra view, which is the safe direction."
+  [state]
+  (:voted-hash state))
+
+(defn- may-vote?
+  "One vote per view — and inside that view, one BRANCH.
+
+  `voted-view` alone said one vote per view and then had to be worked around,
+  because chained HotStuff genuinely does vote twice inside a view: for a
+  block, and then for its child. `vote-on-tip` bought that back by casting a
+  vote and putting the watermark where it found it, which does not distinguish
+  a CHILD from a SIBLING.
+
+  A sibling is equivocation — same witness, same height, same view, two
+  blocks — and it is the fingerprint `inga.stake/detect-equivocation` exists
+  to name. **Measured on the deployed chain**: `equivocators ['w3']` under the
+  corrected rule that keys on the view, so not a view change misread; one
+  replica really did vote twice inside one view.
+
+  And it is where the two-branch fork comes from. `fold-vote` keeps the first
+  vote per `[witness height]` and refuses the second, so BOTH branches lose
+  that witness: four replicas splitting two and two end up with one countable
+  vote each against a quorum of three, which is the state the deployed chain
+  stopped in.
+
+  So the second vote in a view is allowed exactly when it extends the first.
+  That is the case chained HotStuff needs and the sibling is not it."
+  [state block]
+  (boolean
+   (or (> (:view (:pm state)) (voted-view state))
+       (when-let [h (voted-block state)]
+         (ancestor? state h block)))))
 
 (defn- commits
   "Blocks newly committed by the 3-chain rule, in order.
@@ -670,6 +726,92 @@
   enough to be undone by a single sync."
   4)
 
+(def ^:const sync-ask-ms
+  "The floor between two sync-requests from one replica. **1000.**
+
+  A second is long next to a block and short next to an outage, which is the
+  range this is for. It is a floor and not a period: the view gate still
+  applies, so a healthy replica that never times out never asks at all."
+  1000)
+
+(def ^:const fork-window
+  "How far below its own tip a replica looks when it turns out to be on the
+  wrong branch. **8.**
+
+  One bound over two things: the work a re-anchor may do, and the blocks it
+  may discard. Eight is `resume-tail`, which is what a replica booted from a
+  snapshot holds in memory — asking further back is asking for what no peer
+  can answer. A fork deeper than the window is a partition, and the answer to
+  a partition is the truncation `stalled-on-an-uncertified-tip?` already
+  makes, not a re-anchor."
+  8)
+
+;; ── being on the wrong branch, which is not the same as being behind ────────
+
+(defn- on-own-chain?
+  "Is the block named by `block-hash` the one this replica holds at `h`?
+
+  Indexed, not searched: `:chain` is contiguous, so the height IS the
+  position. Answering by scanning would put the length of the chain in the
+  path of every new-view, which is the cost `commits` was already rewritten to
+  stop paying."
+  [state h block-hash]
+  (let [chain (:chain state)
+        i (- h (:inga.block/height (first chain) 0))]
+    (and (<= 0 i) (< i (count chain))
+         (= block-hash ((:hash-fn state) (nth chain i))))))
+
+(defn- elsewhere?
+  "Does `qc` certify a block this replica does not hold, at a height it has
+  already filled with a different one?
+
+  A fork stated as evidence rather than guessed at, and the evidence is a
+  quorum certificate, so no single peer can manufacture it.
+
+  `behind` cannot see this. It subtracts heights, and two branches of a fork
+  are the same length — the difference is zero and the replica concludes it is
+  up to date. **Measured on the deployed chain**: w4 at height 1030 refusing a
+  proposal for 1031 with `no-parent`, `behind 0`, asking for nothing. It was
+  not behind. It was elsewhere."
+  [state qc]
+  (let [h (:inga.qc/height qc -1)]
+    (and (pos? h)
+         (<= h (height state))
+         (not (on-own-chain? state h (:inga.qc/block-hash qc))))))
+
+(defn- fork-request
+  "A sync-request for the branch around height `h`, starting BELOW this
+  replica's own tip.
+
+  Every other request starts at `(inc height)`, which is right when a replica
+  is behind and useless when it is elsewhere: no block above its own tip can
+  attach to a branch it is not on, so the answer comes back `does-not-link`
+  and it stays exactly where it was.
+
+  Floored at the committed height, which is the one place a re-anchor may not
+  walk past."
+  [state h]
+  (let [from (max 1 (inc (committed-height state)) (- h fork-window))]
+    {:type :sync-request
+     :from from
+     :to (+ from (:max-batch sync/default-params))}))
+
+(defn- fork-ask
+  "The outbox for a `fork-request`, or nil when this replica has asked
+  recently.
+
+  Rate-limited exactly like the tick's own request — once per view and at most
+  once per `sync-ask-ms` — for the reason stated there: a replica that has
+  asked and not been helped must ask LESS often, or the recovery eats the
+  transport it needs in order to recover."
+  [state h now]
+  (when-not (or (= (:view (:pm state)) (:last-fork-ask state))
+                (< now (+ (:last-fork-ask-at state 0) sync-ask-ms)))
+    [{:to :all :msg (fork-request state h)}]))
+
+(defn- asked-for-the-fork [state now]
+  (assoc state :last-fork-ask (:view (:pm state)) :last-fork-ask-at now))
+
 (defn high-qc-block
   "The highest block in this replica's own chain that it holds a certificate
   for, and how many blocks sit above it uncertified.
@@ -885,12 +1027,21 @@
     (cond
       ;; nothing to check it against — ask for what is missing rather than
       ;; voting on a block whose parent this replica has never seen
+      ;;
+      ;; WHERE to ask from depends on which of the two things is wrong. A
+      ;; parent above this replica's tip means it is behind, and the window
+      ;; above the tip is the answer. A parent at or BELOW the tip that it
+      ;; does not hold means the proposal is on another branch, and every
+      ;; block above the tip is then unable to attach — which is the deployed
+      ;; `no-parent`, repeated forever against an answer that could never fit.
       (nil? parent)
       [(note-proposal state block :no-parent)
-       [{:to :all :msg {:type :sync-request
-                              :witness (:id state)
-                              :from (inc (height state))
-                              :to (:inga.block/height block)}}]]
+       [{:to :all :msg (if (<= (dec h) (height state))
+                         (fork-request state (dec h))
+                         {:type :sync-request
+                          :witness (:id state)
+                          :from (inc (height state))
+                          :to h})}]]
 
       (not (c/direct-extends? hf parent block))
       [(note-proposal state block :does-not-extend-its-parent) []]
@@ -948,9 +1099,15 @@
       ;; already did the work.
       ;;
       ;; Within a view nothing has changed: the same block re-sends the same
-      ;; vote, a different one gets nothing. The view only increases, so `<=`
-      ;; covers this view and every view already left.
-      (<= (:view (:pm state)) (voted-view state))
+      ;; vote, a different one gets nothing.
+      ;; One vote per view, per BRANCH.
+      ;;
+      ;; `(<= view voted-view)` alone refused the CHILD of the block this
+      ;; replica had just voted for, which chained HotStuff needs, and
+      ;; `vote-on-tip` bought that back by not spending the view at all —
+      ;; which admitted a SIBLING, and a sibling is equivocation. `may-vote?`
+      ;; separates the two, so neither workaround is needed.
+      (not (may-vote? state block))
       (let [state (note-proposal (extend-chain state block) block
                                  :already-voted-in-this-view)
             mine (get-in state [:votes (hf block) (:witness state)])]
@@ -984,7 +1141,15 @@
           ;; proposal whose hash equals our tip is the block we voted for.
           ;; Anything else still gets nothing, which is what stops this from
           ;; being an equivocation.
-          (= (hf block) (hf (tip state)))
+          ;;
+          ;; Only when the block this view's vote went to is UNKNOWN, which is
+          ;; exactly the restart this exists for: a running replica that voted
+          ;; in this view knows what it voted for, and `may-vote?` has already
+          ;; answered from it. Reaching here with a known `:voted-hash` means
+          ;; the tip is not a descendant of that vote, and casting for it is
+          ;; the sibling case — the one the deployed chain recorded as
+          ;; `equivocators ['w3']`.
+          (and (nil? (voted-block state)) (= (hf block) (hf (tip state))))
           (cast-vote state block now)
 
           :else [state []]))
@@ -1242,11 +1407,14 @@
                    sig (assoc :sig sig))
             [state' out] (fold-vote (-> state
                                         (update :voted conj ht)
-                                        ;; The view this vote was cast in.
-                                        ;; Equivocation is defined against it,
-                                        ;; and `voted-view` is what a host must
-                                        ;; make durable before the vote leaves.
-                                        (assoc :voted-view view))
+                                        ;; The view this vote was cast in, and
+                                        ;; WHAT it was cast for. Equivocation
+                                        ;; is defined against the pair: a
+                                        ;; second vote in this view is only a
+                                        ;; view's second vote if it extends
+                                        ;; this block, and a sibling of it is
+                                        ;; the fingerprint. See `may-vote?`.
+                                        (assoc :voted-view view :voted-hash bh))
                                     vote now)]
         [state' (into [{:to (vote-to state block) :msg (assoc vote :type :vote)}] out)]))))
 
@@ -1258,17 +1426,26 @@
   never advanced its own chain, so it re-proposed the same height forever
   while the rest of the network waited for a proposal that already existed.
 
-  Gated by VIEW, like `handle-proposal` — this was the last place still
-  gating by HEIGHT, and the two rules disagree exactly when it matters. A
-  leader rebuilding on its highest QC after a failed round proposes at the
-  same height again, and the height gate made it refuse to vote for the block
-  it had just built: the one vote guaranteed to exist was the one that was
-  never cast."
+  Gated by `may-vote?`, like `handle-proposal` and `vote-on-tip` — this was
+  the last place still gating by HEIGHT, and the two rules disagree exactly
+  when it matters. A leader rebuilding on its highest QC after a failed round
+  proposes at the same height again, and the height gate made it refuse to
+  vote for the block it had just built: the one vote guaranteed to exist was
+  the one that was never cast.
+
+  A plain view gate is not enough either, in both directions. `on-tick`'s
+  timeout branch runs `vote-on-tip` and then `propose` in one tick, so the
+  proposer has already spent the view when it gets here — and the block it
+  built extends the tip it just voted for, which is the case a view gate
+  refuses and `may-vote?` allows. The other direction is the one that
+  mattered: a leader that REBUILT on its highest QC proposes a SIBLING of the
+  block it voted for, and voting for that is equivocation at one height in one
+  view. `may-vote?` refuses it; a view that had been left unspent did not."
   [state b now]
   (let [state (-> state (remember-block b) (extend-chain b))]
-    (if (<= (:view (:pm state)) (voted-view state))
-      [state []]
-      (cast-vote state b now))))
+    (if (may-vote? state b)
+      (cast-vote state b now)
+      [state []])))
 
 (defn- sync-view
   "Jump to a higher view when f+1 distinct witnesses are at or past it.
@@ -1433,7 +1610,21 @@
                                              (:inga.qc/height high-qc)
                                              sync/default-params)]
                     [{:to :all :msg (assoc r :type :sync-request
-                                             :witness (:id state))}]))]
+                                             :witness (:id state))}]))
+            ;; And the case `behind` structurally cannot report: a certificate
+            ;; for a block at or under this replica's own height that is not
+            ;; the block it holds there. That is the fork, and the new-view is
+            ;; where the evidence for it arrives — every timeout carries the
+            ;; sender's highest certificate, so the losing side is being told,
+            ;; every view, exactly which block it does not have.
+            ;;
+            ;; It just could not act on it: `behind` is zero for two branches
+            ;; of equal length, so nothing was ever asked for. See
+            ;; `elsewhere?` and `fork-request`.
+            fork (when (and high-qc (empty? ask) (elsewhere? state high-qc))
+                   (fork-ask state (:inga.qc/height high-qc) now))
+            state (cond-> state fork (asked-for-the-fork now))
+            ask (into (vec ask) fork)]
         (if-let [tc (pm/timeout-certificate (vec msgs) (:quorum state))]
           (let [state (update state :pm pm/on-timeout-certificate tc now (:params state))
                 [state out] (propose state now)]
@@ -1532,7 +1723,7 @@
   This function never votes for anything except `(tip state)`, so nothing
   else at that height can be voted for by accident.
 
-  ## Re-affirming does not spend the view's vote
+  ## Re-affirming spends the view's vote, and used not to
 
   `cast-vote` records `:voted-view`, and `handle-proposal` refuses anything in
   a view already voted in. So this function — which fires every view a tip is
@@ -1545,29 +1736,33 @@
   `votes-for-tip 4` on 26687 and 2 on 26688, views climbing 400 past the
   height without a single block.
 
-  Preserving `:voted-view` is safe because one-vote-per-view exists to stop a
-  replica voting for two CONFLICTING proposals in one view. This votes only
-  for `(tip state)` — a block already on this replica's own chain — and then
-  the next proposal extends it. Voting for a block and then for its child is
-  what chained HotStuff is, not equivocation, and `pacemaker/safe-to-vote?`
-  is still the thing deciding."
+  The answer was to put `:voted-view` back after casting, on the argument that
+  voting for a block and then for its child is chained HotStuff and not
+  equivocation. The argument is right about the CHILD and says nothing about a
+  SIBLING — and an unspent view admits both. A sibling at one height in one
+  view is the objective double-vote fingerprint, and the deployed chain
+  recorded it: `equivocators ['w3']` under the rule that keys on the view.
+
+  Worse than the record: `fold-vote` keeps the first vote per
+  `[witness height]` and refuses the second, so an equivocator's vote counts
+  for NEITHER branch. Two replicas on each of two branches then hold one
+  countable vote each against a quorum of three, which is where the chain
+  stopped.
+
+  So the vote is spent here like anywhere else, and `may-vote?` — which allows
+  a second vote in a view only for a block that extends the first — is what
+  keeps the child case working. It is the same predicate `handle-proposal`
+  asks, so there is one rule and not a rule plus an escape from it."
   [state now]
   (let [t (tip state)
         h (:inga.block/height t)
         hf (:hash-fn state)
-        mine (get-in state [:votes (hf t) (:witness state)])
-        ;; Cast, then put the watermark back where it was.
-        reaffirm (fn [st]
-                   (let [before (:voted-view st -1)
-                         [s2 out] (cast-vote st t now)]
-                     [(assoc s2 :voted-view before) out]))]
+        mine (get-in state [:votes (hf t) (:witness state)])]
     (cond
       (zero? h) [state []]
 
-      ;; Never voted here: the ordinary case.
-      (not (voted? state h)) (reaffirm state)
-
       ;; Voted, and still holding the vote: re-send it rather than re-signing.
+      ;; Costs no vote at all, so no view is spent by it.
       mine
       [state [{:to (vote-to state t)
                :msg (cond-> {:type :vote
@@ -1578,9 +1773,118 @@
                                (:inga.vote/sig mine)
                                (assoc :sig (:inga.vote/sig mine)))}]]
 
-      ;; Voted, and no longer holding the vote — a restart. Cast it again for
-      ;; the block we hold.
-      :else (reaffirm state))))
+      ;; This view's vote went somewhere this tip does not extend. Casting
+      ;; again is the sibling case; the next view is where it belongs.
+      (not (may-vote? state t)) [state []]
+
+      ;; Never voted here, or voted and no longer holding the vote after a
+      ;; restart. Either way the block we hold is the one to vote for.
+      :else (cast-vote state t now))))
+
+(defn- fork-attachment
+  "Where a segment that does not extend this replica's tip joins its chain.
+
+  Returns `[index tail]` — the position in `:chain` of the block the segment
+  builds on, and the part of the segment above it — or nil when it joins
+  nowhere within `fork-window` of the tip.
+
+  The HIGHEST attachment, because that is the one that discards least. A
+  segment answering a request that reached below the tip overlaps this
+  replica's own chain, and every block of the overlap attaches somewhere, so
+  taking the first would walk it back through history it already agrees with."
+  [state segment]
+  (let [hf (:hash-fn state)
+        chain (:chain state)
+        lo (max 0 (- (count chain) fork-window))
+        pos (into {} (map (fn [i] [(hf (nth chain i)) i])) (range lo (count chain)))]
+    (reduce (fn [best i]
+              (if-let [j (get pos (:inga.block/parent-hash (nth segment i)))]
+                (if (or (nil? best) (> j (first best))) [j (subvec segment i)] best)
+                best))
+            nil
+            (range (count segment)))))
+
+(defn- adopt-fork
+  "Move onto a branch a later quorum has certified. `[state' outbox]`, or nil
+  when there is nothing to move onto.
+
+  ## Why a replica needs this at all
+
+  Every path a block enters by requires it to extend this replica's own tip.
+  `extend-chain` appends nothing else, and `inga.sync/sync-step` anchors on
+  `(last chain)`. So a replica on the losing side of a fork can neither ask
+  for the winning branch — its requests start above its own tip — nor adopt it
+  if handed it. The other side refuses the losing branch through the lock,
+  correctly. Nothing crosses.
+
+  **Measured**: w2 at 1031 answering `:locked-elsewhere` to 1030, w4 at 1030
+  answering `:no-parent` to 1031, one countable vote on each branch against a
+  quorum of three. The chain does eventually leave that state, by
+  `stalled-on-an-uncertified-tip?` truncating both sides back to a certificate
+  — 32 views away, and a view on a stalled chain is as long as the backoff
+  makes it. That escape is a last resort, not a resolution.
+
+  ## What makes it safe, and none of it is `safe-to-vote?` being relaxed
+
+  1. **Nothing at or below the committed height moves.** The anchor has to sit
+     at or above it, so only work above it is discarded. Same floor
+     `high-qc-block` walks to, and the same argument: a commit needs three
+     chained certificates, so nothing being dropped here can have been
+     committed by anybody.
+  2. **The incoming branch has to be strictly better justified**, by
+     `pacemaker/higher-qc` — the order the lock is already kept in. Compared:
+     the highest certificate for a block ABOVE the fork point that the segment
+     carries or this replica already holds, against the highest it holds for
+     the blocks it would discard. The first block's certificate names the
+     anchor, which both branches share, so it distinguishes nothing and is not
+     counted. Two branches with nothing certified above the fork are a tie,
+     and a tie changes nothing — which is what stops two replicas from
+     swapping branches at each other forever.
+  3. **The tip it lands on has to be one it may still vote for.**
+     `pacemaker/safe-to-vote?`, unchanged, asked about that block. Adopting a
+     branch it is locked out of would leave it on a chain it cannot support,
+     which is the state `:locked-elsewhere` exists to refuse.
+
+  The segment itself still goes through `inga.sync/sync-step` against the
+  truncated chain, so every block carries a quorum certificate for its own
+  parent and is proposed by the leader of its round. This decides WHERE to
+  attach. It does not decide what may be believed."
+  [state segment now]
+  (when-let [[idx tail] (fork-attachment state segment)]
+    (let [chain (:chain state)
+          hf (:hash-fn state)
+          anchor (nth chain idx)]
+      (when (and (< idx (dec (count chain)))          ; a fork, not an append
+                 (>= (:inga.block/height anchor) (committed-height state)))
+        (let [{new-chain :chain adopted :adopted}
+              (sync/sync-step hf (:quorum state) (subvec chain 0 (inc idx)) tail
+                              (assoc sync/default-params
+                                     :witnesses (:witnesses state))
+                              (:chain-id state) (:verify-fn state))]
+          (when (pos? adopted)
+            (let [taken (subvec new-chain (inc idx))
+                  dropped (subvec chain (inc idx))
+                  ours (reduce pm/higher-qc nil
+                               (keep #(get (:qcs state) (hf %)) dropped))
+                  theirs (reduce pm/higher-qc nil
+                                 (concat (map :inga.block/justify (rest taken))
+                                         (keep #(get (:qcs state) (hf %)) taken)))
+                  moved (reduce remember-block state taken)]
+              (when (and theirs
+                         (not= ours (pm/higher-qc ours theirs))
+                         (pm/safe-to-vote? (:pm moved) (peek new-chain)
+                                           #(ancestor? moved %1 %2)))
+                (-> moved
+                    (assoc :chain new-chain)
+                    absorb-commits
+                    ;; What was given up and for what. A re-org that leaves no
+                    ;; record is a height that went backwards with nothing to
+                    ;; read, and this file has already paid for that once.
+                    (assoc :last-fork {:at (:inga.block/height anchor)
+                                       :dropped (count dropped)
+                                       :adopted adopted})
+                    (update :forks (fnil inc 0))
+                    (vote-on-tip now))))))))))
 
 (defn- handle-sync-response
   "Adopt a segment through `inga.sync`, or refuse it whole, and vote for what
@@ -1652,7 +1956,12 @@
           (as-> s (reduce remember-block s segment))
           absorb-commits
           (vote-on-tip now))
-      [state []])))
+      ;; It did not extend our tip. It may still join our chain BELOW it,
+      ;; which is a fork rather than a lag and is the one thing nothing here
+      ;; could act on. `adopt-fork` answers nil unless the branch it offers is
+      ;; better justified than the one being given up.
+      (or (adopt-fork state segment now)
+          [state []]))))
 
 (defn- vote-verifier
   "A `(fn [vote] boolean)` for `inga.stake/verify-equivocation-evidence`,
@@ -1716,14 +2025,6 @@
     :sync-response (handle-sync-response state msg now)
     :evidence (handle-evidence state msg)
     [state []]))
-
-(def ^:const sync-ask-ms
-  "The floor between two sync-requests from one replica. **1000.**
-
-  A second is long next to a block and short next to an outage, which is the
-  range this is for. It is a floor and not a period: the view gate still
-  applies, so a healthy replica that never times out never asks at all."
-  1000)
 
 (defn on-tick
   "Time passed. Times the view out when the deadline has gone by, and
@@ -2044,6 +2345,10 @@
      ;; The view watermark. Without it a resumed replica starts at -1 and may
      ;; vote a second time in a view it has already voted in.
      :voted-view (:voted-view state -1)
+     ;; And what that vote was for. Without it the resumed replica knows it
+     ;; voted and not for what, so it cannot tell a descendant of its own vote
+     ;; from a sibling of it — and refuses both, for a view.
+     :voted-hash (:voted-hash state)
      :committed (vec (take-last 1 (:committed state)))
      :machine-state (:machine-state state)
      :equivocations (vec (:equivocations state))
@@ -2074,6 +2379,9 @@
             ;; a replica has to re-earn its watermark by voting, which is the
             ;; same position a fresh one is in.
             :voted-view (:voted-view snapshot -1)
+            ;; nil for a snapshot written before this field existed, which
+            ;; costs that replica one view of voting. See `voted-block`.
+            :voted-hash (:voted-hash snapshot)
             :committed (vec (:committed snapshot))
             :machine-state (:machine-state snapshot)
             :equivocations (vec (:equivocations snapshot))

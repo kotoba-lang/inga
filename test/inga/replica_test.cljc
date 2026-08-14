@@ -1716,6 +1716,239 @@
                (sort-by key before) " after "
                (sort-by key (into {} (for [[v x] after] [v (r/height x)]))))))))
 
+;; ── one view, one branch ────────────────────────────────────────────────────
+;;
+;; Measured on the deployed chain: `equivocators ['w3']` under the corrected
+;; detection rule, which keys on (witness, height, VIEW). So it is not a view
+;; change misread as a double-vote — that class was fixed and the rebuild
+;; started at zero. It is one replica casting two votes for two different
+;; blocks at one height inside one view.
+;;
+;; That is also where the two-branch fork comes from. An equivocator's second
+;; vote is REFUSED by every peer that saw the first, so the branch it was cast
+;; for is left one vote short — and with four replicas splitting two and two,
+;; both branches are.
+
+(defn- emitted-votes
+  "The votes in an outbox, in `inga.stake/detect-equivocation`'s shape."
+  [outbox]
+  (->> outbox
+       (map :msg)
+       (filter #(= :vote (:type %)))
+       (mapv (fn [v] {:inga.vote/witness (:witness v)
+                      :inga.vote/height (:height v)
+                      :inga.vote/view (:view v)
+                      :inga.vote/block-hash (:block-hash v)}))))
+
+(deftest a-replica-does-not-vote-twice-in-one-view-at-one-height
+
+  (testing "SPECIFICATION — a replica that has re-affirmed its uncertified tip
+            has spent its vote for that view, and a sibling arriving in the
+            same view gets nothing.
+
+            `vote-on-tip` casts a real vote and then puts `:voted-view` back
+            where it found it, so the view is not spent. The reasoning was
+            that voting for a block and then its CHILD inside one view is
+            ordinary chained HotStuff. It is — and the same hole admits a
+            SIBLING, which is equivocation: same witness, same height, same
+            view, two blocks. Measured on the deployed chain as
+            `equivocators ['w3']`.
+
+            Both votes are then refused by every peer that saw the other one,
+            so the two branches this produces are each one vote short of a
+            quorum that will never form."
+    (let [rs (run)
+          s (get rs :w2)
+          hf (:hash-fn s)
+          t (r/tip s)
+          h (:inga.block/height t)
+          parent (nth (:chain s) (- (count (:chain s)) 2))
+          qc-parent (:inga.block/justify t)
+          view 40
+          ;; The tip has no certificate and this replica has not voted at its
+          ;; height: the state `vote-on-tip` was written for, and the one a
+          ;; catch-up leaves behind.
+          stuck (-> s
+                    (update :qcs dissoc (hf t))
+                    (update :votes dissoc (hf t))
+                    (update :voted disj h)
+                    (assoc-in [:pm :locked-qc] qc-parent)
+                    (assoc-in [:pm :high-qc] qc-parent)
+                    (assoc-in [:pm :view] view)
+                    (assoc-in [:pm :deadline] 1)
+                    (assoc :voted-view (dec view)))
+          [after-tick out1] (r/on-tick stuck 1000000)
+          ;; A sibling of the tip, proposed by the leader of a later round.
+          ;; Nothing about it is Byzantine: a round that timed out hands the
+          ;; next one to a different witness, and that witness builds on the
+          ;; same certificate.
+          round (+ 2 (:inga.block/round t 0))
+          sibling (c/make-block {:height h :parent-hash (hf parent)
+                                 :proposals []
+                                 :proposer (c/led-by (:witnesses s) round)
+                                 :round round
+                                 :ts (+ 7 (:inga.block/ts t))
+                                 :justify qc-parent})
+          [_ out2] (r/on-message after-tick
+                                 {:type :proposal :block sibling} 1000001)
+          votes (into (emitted-votes out1) (emitted-votes out2))]
+      (is (seq (filter #(= h (:inga.vote/height %)) votes))
+          "the harness produced no vote at the tip's height, so it proves nothing")
+      (is (empty? (stake/detect-equivocation votes))
+          ;; The hashes are canonical block strings and printing them is
+          ;; pages of parent chain, so the fingerprint is what gets reported.
+          (str "two votes at one height in one view: "
+               (mapv (juxt :inga.evidence/witness :inga.evidence/height)
+                     (stake/detect-equivocation votes)))))))
+
+;; ── two branches, two replicas each, and nothing that crosses ───────────────
+
+(defn- forked-exactly-as-deployed
+  "The two-branch stall, measured on the deployed chain:
+
+      w2  h 1031  view 1039  no-certificate-for-the-tip  votes-for-tip 1
+          last-proposal 1030 -> :locked-elsewhere
+      w4  h 1030  view 1050  no-certificate-for-the-tip  votes-for-tip 1
+          last-proposal 1031 -> :no-parent
+
+  Two replicas on each branch, tips at adjacent heights, neither branch at
+  quorum, and the two refusals that make it permanent: the long side is
+  LOCKED against the short one, and the short side does not hold the long
+  one's parent.
+
+  The fork itself is honest. `a1` and `b1` are both children of the same
+  certified block, proposed by the leaders of two different rounds — which is
+  what a round that timed out produces — so no witness has equivocated by
+  proposing them. `a1` carried a quorum, `b1` did not, and the replicas that
+  never saw `a1` cannot be told about it: every request they make starts one
+  above their own tip, and no block above their tip attaches to a branch they
+  are not on.
+
+  Conditions 5 and 6 of `stalled-exactly-as-deployed` still apply: the
+  deadline expires on every tick, and the caller's clock has to outrun the
+  exponential backoff."
+  [rs]
+  (let [ws (vec (sort (keys rs)))
+        n (count ws)
+        s0 (get rs (first ws))
+        hf (:hash-fn s0)
+        wire-ws (:witnesses s0)
+        fork-parent (r/tip s0)
+        qc-p (get (:qcs s0) (hf fork-parent))
+        hp (:inga.block/height fork-parent)
+        rp (:inga.block/round fork-parent 0)
+        ra (inc rp)
+        mk (fn [h round parent justify ts]
+             (c/make-block {:height h :parent-hash (hf parent) :proposals []
+                            :proposer (c/led-by wire-ws round)
+                            :round round :ts ts :justify justify}))
+        base-ts (:inga.block/ts fork-parent)
+        a1 (mk (inc hp) ra fork-parent qc-p (+ base-ts 100))
+        va (+ 2 (:inga.qc/view qc-p 0))
+        ;; A real quorum. Three witnesses voted for `a1`, and one of them is a
+        ;; replica that later moved onto the other branch in a LATER view —
+        ;; which is a view change and not a double-vote.
+        qc-a1 (c/qc (mapv #(assoc (c/make-vote % (hf a1) (inc hp))
+                                  :inga.vote/view va)
+                          (take (c/quorum-size n) wire-ws))
+                    n va)
+        a2 (mk (+ hp 2) (inc ra) a1 qc-a1 (+ base-ts 200))
+        ;; The other child of the same parent, two rounds on, so its proposer
+        ;; is a different witness and nobody proposed twice in one round.
+        b1 (mk (inc hp) (+ ra 2) fork-parent qc-p (+ base-ts 300))
+        vb (+ 3 va)
+        vote-for (fn [b w view]
+                   (assoc (c/make-vote w (hf b) (:inga.block/height b))
+                          :inga.vote/view view))
+        adopt (fn [s blocks]
+                (reduce (fn [s b] (-> s
+                                      (update :by-hash assoc (hf b) b)
+                                      (update :chain conj b)))
+                        s blocks))
+        on-branch (fn [s blocks qcs votes view voted-view voted]
+                    (-> (adopt s blocks)
+                        (update :qcs merge qcs)
+                        (update :votes merge votes)
+                        (update :voted into voted)
+                        (assoc-in [:pm :view] view)
+                        (assoc-in [:pm :deadline] 1)
+                        (assoc :voted-view voted-view)))
+        long-side (fn [s w]
+                    (-> (on-branch s [a1 a2] {(hf a1) qc-a1}
+                                   {(hf a2) {w (vote-for a2 w (+ va 9))}}
+                                   (+ va 9) (+ va 9) [(inc hp) (+ hp 2)])
+                        (update :pm pm/on-qc qc-a1)))
+        short-side (fn [s w]
+                     (on-branch s [b1] {}
+                                {(hf b1) {w (vote-for b1 w vb)}}
+                                (+ vb 12) (+ vb 12) [(inc hp)]))]
+    (into {}
+          (for [[w s] rs
+                :let [wid (wire/wire-id w)]]
+            [w (if (contains? #{(nth ws 0) (nth ws 1)} w)
+                 (long-side s wid)
+                 (short-side s wid))]))))
+
+(deftest the-two-branch-stall-reproduced
+  (testing "SPECIFICATION — two branches at adjacent heights, two replicas on
+            each, neither at quorum, must not stay there.
+
+            The measured refusals are the two halves of the deadlock. The
+            long side answers `:locked-elsewhere`, correctly: it holds a
+            certificate for a block the short side's proposal excludes. The
+            short side answers `:no-parent`, and cannot fix it: a sync
+            request starts one above its own tip, and no segment above its
+            tip attaches to a branch it is not on.
+
+            The chain must converge on one branch and move, and no honest
+            replica may be recorded as an equivocator while it does."
+    (let [rs (run)
+          stuck (forked-exactly-as-deployed rs)
+          before (into {} (for [[w s] stuck] [w (r/height s)]))
+          forked-at (apply min (vals before))
+          after (reduce (fn [acc t]
+                          (let [step (reduce (fn [a v]
+                                               (let [[s2 out] (r/on-tick (get (:rs a) v) t)]
+                                                 (-> a
+                                                     (update :rs assoc v s2)
+                                                     (update :ob into (map #(assoc % :from v) out)))))
+                                             {:rs acc :ob []}
+                                             (sort (keys acc)))
+                                [rs2 _ _] (deliver-all (:rs step) (vec (:ob step)) t 4000)]
+                            rs2))
+                        stuck
+                        ;; Bounded WELL under `stall-views`. Left to run
+                        ;; longer this recovers on its own: the tip stays
+                        ;; uncertified, `stalled-on-an-uncertified-tip?`
+                        ;; eventually fires, every replica truncates back to a
+                        ;; block it holds a certificate for, and the fork
+                        ;; resolves. That escape is the last resort and it is
+                        ;; priced in views — 32 of them, and views on a
+                        ;; stalled chain are as long as the backoff makes
+                        ;; them, which is up to 64 seconds each. A fork that
+                        ;; two replicas can see is a certificate for is not
+                        ;; supposed to cost half an hour.
+                        ;;
+                        ;; So the budget is what pins this. Measured on the
+                        ;; unfixed code: heights [30 30 29 29] unmoved for
+                        ;; seventeen views, `no-certificate-for-the-tip` on
+                        ;; all four, until the truncation bailed it out at
+                        ;; view 62 — and w3 equivocated on the way through.
+                        (range 1000000 (+ 1000000 (* 16 70000)) 70000))
+          heights (into {} (for [[v x] after] [v (r/height x)]))
+          at-fork (fn [s] (some #(when (= forked-at (:inga.block/height %))
+                                   ((:hash-fn s) %))
+                                (:chain s)))
+          grew (count (filter (fn [[v x]] (> (r/height x) (get before v))) after))]
+      (is (>= grew 3)
+          (str "the chain never left the branches it was stuck on — before "
+               (sort-by key before) " after " (sort-by key heights)))
+      (is (= 1 (count (distinct (keep (fn [[_ s]] (at-fork s)) after))))
+          (str "the two branches are still both alive at height " forked-at))
+      (is (every? (fn [[_ s]] (empty? (r/equivocators s))) after)
+          (str "an honest replica was recorded as an equivocator: "
+               (into {} (for [[v s] after] [v (r/equivocators s)])))))))
+
 (deftest stale-evidence-stops-condemning-once-the-rule-is-fixed
   (testing "A replica keeps the proofs it recorded. Detection used to key on
             (witness, height) and called every legitimate view change a
@@ -1739,3 +1972,51 @@
                             :inga.evidence/vote-a (v 7 3 "a")
                             :inga.evidence/vote-b (v 7 3 "b")})))
           "a real same-view double-vote must still be reported"))))
+
+
+(deftest one-view-one-branch-a-sibling-is-refused
+  ;; NOTE: this pins the property, it does not discriminate the fix. Reverting
+  ;; `may-vote?` to the old `(<= view voted-view)` leaves it green, because the
+  ;; old rule also refuses when the watermark is at the current view. The path
+  ;; that actually leaked was the watermark being RESTORED to an earlier view
+  ;; by `vote-on-tip`, which this harness cannot express now that the restore
+  ;; is gone. The discriminator for that is the deployed chain: honest
+  ;; replicas being recorded as equivocators.
+  (testing "SPECIFICATION — inside one view a replica may vote for a block and
+            then for its CHILD (that is chained HotStuff), but never for a
+            SIBLING of what it already voted for. Same witness, same height,
+            same view, two blocks is the fingerprint
+            `inga.stake/detect-equivocation` exists to name, and a replica must
+            not produce it.
+
+            Measured on the deployed chain: equivocators ['w3'] under the
+            corrected (witness, height, view) rule — a genuine same-view double
+            vote by an honest replica, and two branches at adjacent heights
+            each holding one vote."
+    (let [rs (run)
+          [w s] (first (sort-by key rs))
+          t (r/tip s)
+          h (:inga.block/height t)
+          view (:inga.block/round t 0)
+          parent (nth (:chain s) (dec (count (:chain s))) nil)
+          gp ((:hash-fn s) (nth (:chain s) (- (count (:chain s)) 2)))
+          ;; Two DIFFERENT blocks at the tip's height, same parent: siblings.
+          sib-a (c/make-block {:height h :parent-hash gp :proposals ["a"]
+                               :proposer :w2 :round view :ts 1
+                               :justify (get (:qcs s) gp)})
+          sib-b (c/make-block {:height h :parent-hash gp :proposals ["b"]
+                               :proposer :w2 :round view :ts 1
+                               :justify (get (:qcs s) gp)})
+          ;; A replica that has already voted for sib-a in this view.
+          voted (-> s
+                    (assoc-in [:pm :view] view)
+                    (assoc :voted-view view
+                           :voted-hash ((:hash-fn s) sib-a)))
+          [_ out] (r/on-message voted {:type :proposal :block sib-b} 9999)
+          votes (filter #(= :vote (:type (:msg %))) out)]
+      (is (not= ((:hash-fn s) sib-a) ((:hash-fn s) sib-b))
+          "the harness built one block twice, so nothing is being tested")
+      (is (empty? votes)
+          (str "voted for a sibling in the same view it had already voted in —"
+               " that is the equivocation fingerprint, emitted by an honest"
+               " replica")))))
