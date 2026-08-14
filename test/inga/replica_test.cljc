@@ -782,14 +782,45 @@
       (is (= 1 (r/height back)))
       (is (= (hash-fn b1) (hash-fn (r/tip back)))))))
 
-(deftest a-restarted-replica-does-not-vote-twice-at-a-height
+(deftest a-replica-does-not-vote-twice-in-a-view
   (testing "equivocation — the one crime this system slashes for — committed
-            by accident, against itself"
+            by accident, against itself.
+
+            The rule is per VIEW now. Per height was stricter and that
+            strictness is what turned a transient fork into a permanent
+            deadlock; safety across views is the lock rule, which was always
+            here. What must remain impossible is two votes for DIFFERENT
+            blocks in the SAME view."
     (let [[_ b1] (chain-of-two)
-          back (r/replay (get (net) :w2) [b1])
+          back (-> (r/replay (get (net) :w2) [b1])
+                   ;; What a host restores from durable storage. Without it
+                   ;; the replica does not know it has voted, which is the
+                   ;; window `with-voted-view` exists to close.
+                   (r/with-voted-view 9999))
           [_ out] (r/on-message back {:type :proposal
                                       :block (assoc b1 :inga.block/ts 999)} 2000)]
-      (is (empty? (filter #(= :vote (:type (:msg %))) out))))))
+      (is (empty? (filter #(= :vote (:type (:msg %))) out))
+          "voted a second time in a view it had already voted in"))))
+
+(deftest a-competing-block-in-a-later-view-can-be-voted-for
+  (testing "the deadlock the per-height rule caused. Two blocks at one height,
+            the votes split, and nobody able to move — measured on two
+            deployed chains. In HotStuff a later view resolves it, and this is
+            that: the same height, a higher view, and the lock rule deciding."
+    (let [[_ b1] (chain-of-two)
+          back (r/replay (get (net) :w2) [b1])
+          rival (assoc b1 :inga.block/ts 999)
+          ;; A view above anything this replica voted in.
+          ahead (assoc-in back [:pm :view] 50000)
+          [_ out] (r/on-message ahead {:type :proposal :block rival} 3000)]
+      (is (seq (filter #(= :vote (:type (:msg %))) out))
+          "refused a competing block in a later view — which is the deadlock"))))
+
+(deftest the-watermark-only-moves-forward
+  (let [s (r/with-voted-view (get (net) :w1) 100)]
+    (is (= 100 (r/voted-view s)))
+    (is (= 100 (r/voted-view (r/with-voted-view s 5)))
+        "an older watermark re-opened a view already voted in")))
 
 (deftest a-restarted-leader-can-propose-on-the-tip
   (testing "without the certificates back, a leader sits on a chain it cannot

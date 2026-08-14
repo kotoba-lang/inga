@@ -323,6 +323,35 @@
 ;; Stated here rather than in a note somewhere, because the next person to
 ;; debug a stalled chain will land on this function.
 
+(defn voted-view
+  "The highest view this replica has voted in, or -1.
+
+  **A host must make this durable before it releases the vote.** That is the
+  whole safety contract of one-vote-per-view: a replica that votes in view V,
+  crashes, comes back not knowing it did, and votes again in V for a different
+  block has equivocated — the one thing this system slashes for, committed by
+  accident against itself.
+
+  `on-message` and `on-tick` return `[state outbox]`. A host that sends the
+  outbox before persisting `(voted-view state)` has a window exactly one crash
+  wide. Persist first, then send. `snapshot` carries it so a `resume` starts
+  from the truth rather than from -1."
+  [state]
+  (:voted-view state -1))
+
+(defn with-voted-view
+  "Put the durable watermark back after a `replay`.
+
+  `snapshot` carries it, so `resume` needs nothing. A host that rebuilds from
+  the LOG instead — `replay` over persisted blocks — has to restore it itself,
+  because the log records what this replica adopted and not what it voted for.
+
+  Monotone: a watermark can only move forward. Restoring an older value than
+  the running state already has would re-open a view this replica has already
+  voted in, which is the whole thing it exists to prevent."
+  [state v]
+  (cond-> state (and (integer? v) (> v (voted-view state))) (assoc :voted-view v)))
+
 (defn voted?
   "Has this replica already voted at `h`?
 
@@ -672,9 +701,27 @@
       ;; the same block, recovered from what this replica already recorded. A
       ;; second vote for a DIFFERENT block at this height is still refused,
       ;; which is the property that matters.
-      (voted? state h)
+      ;; One vote per VIEW, not per height.
+      ;;
+      ;; Per height is stricter than HotStuff and the strictness is what turns
+      ;; a transient fork into a permanent deadlock: two blocks at one height,
+      ;; the votes split, and every replica has already spent its vote there.
+      ;; Measured on both deployed chains, repeatedly — most recently a chain
+      ;; reset to genesis that reached 1927 and stopped with two replicas on
+      ;; one tip, one on another, and one behind.
+      ;;
+      ;; Safety across views is `pm/safe-to-vote?` below, which was always
+      ;; here and always correct: a replica may not vote for a block
+      ;; conflicting with its lock unless a quorum has demonstrably moved past
+      ;; that lock. Per-height was an extra gate in front of a rule that
+      ;; already did the work.
+      ;;
+      ;; Within a view nothing has changed: the same block re-sends the same
+      ;; vote, a different one gets nothing. The view only increases, so `<=`
+      ;; covers this view and every view already left.
+      (<= (:view (:pm state)) (voted-view state))
       (let [state (note-proposal (extend-chain state block) block
-                                 :already-voted-at-this-height)
+                                 :already-voted-in-this-view)
             mine (get-in state [:votes (hf block) (:witness state)])]
         (cond
           mine
@@ -962,7 +1009,14 @@
       (let [vote (cond-> {:witness (:witness state) :block-hash bh
                           :height ht :view view}
                    sig (assoc :sig sig))
-            [state' out] (fold-vote (update state :voted conj ht) vote now)]
+            [state' out] (fold-vote (-> state
+                                        (update :voted conj ht)
+                                        ;; The view this vote was cast in.
+                                        ;; Equivocation is defined against it,
+                                        ;; and `voted-view` is what a host must
+                                        ;; make durable before the vote leaves.
+                                        (assoc :voted-view view))
+                                    vote now)]
         [state' (into [{:to (vote-to state block) :msg (assoc vote :type :vote)}] out)]))))
 
 (defn- adopt-own
@@ -1661,6 +1715,9 @@
      :qcs (into {} (filter (fn [[bh _]] (contains? kept bh)) (:qcs state)))
      :pm (:pm state)
      :voted-below (:inga.block/height (peek chain))
+     ;; The view watermark. Without it a resumed replica starts at -1 and may
+     ;; vote a second time in a view it has already voted in.
+     :voted-view (:voted-view state -1)
      :committed (vec (take-last 1 (:committed state)))
      :machine-state (:machine-state state)
      :equivocations (vec (:equivocations state))
@@ -1687,6 +1744,10 @@
             :pm (:pm snapshot)
             :voted #{}
             :voted-below (:voted-below snapshot)
+            ;; -1 only for a snapshot written before this field existed. Such
+            ;; a replica has to re-earn its watermark by voting, which is the
+            ;; same position a fresh one is in.
+            :voted-view (:voted-view snapshot -1)
             :committed (vec (:committed snapshot))
             :machine-state (:machine-state snapshot)
             :equivocations (vec (:equivocations snapshot))
