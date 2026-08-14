@@ -1435,17 +1435,42 @@
   `voted?` says we voted at this HEIGHT, and **a replica's chain IS what it
   voted for**, so a vote for our own tip is the same vote we already cast.
   This function never votes for anything except `(tip state)`, so nothing
-  else at that height can be voted for by accident."
+  else at that height can be voted for by accident.
+
+  ## Re-affirming does not spend the view's vote
+
+  `cast-vote` records `:voted-view`, and `handle-proposal` refuses anything in
+  a view already voted in. So this function — which fires every view a tip is
+  uncertified — was spending the one vote per view on the OLD tip, and the
+  proposal for the NEXT block, arriving in that same view, was refused
+  `already-voted-in-this-view`. The chain advanced one block and stopped.
+
+  **Measured**: all four replicas with
+  `last-proposal {:height 26688 :outcome :already-voted-in-this-view}`,
+  `votes-for-tip 4` on 26687 and 2 on 26688, views climbing 400 past the
+  height without a single block.
+
+  Preserving `:voted-view` is safe because one-vote-per-view exists to stop a
+  replica voting for two CONFLICTING proposals in one view. This votes only
+  for `(tip state)` — a block already on this replica's own chain — and then
+  the next proposal extends it. Voting for a block and then for its child is
+  what chained HotStuff is, not equivocation, and `pacemaker/safe-to-vote?`
+  is still the thing deciding."
   [state now]
   (let [t (tip state)
         h (:inga.block/height t)
         hf (:hash-fn state)
-        mine (get-in state [:votes (hf t) (:witness state)])]
+        mine (get-in state [:votes (hf t) (:witness state)])
+        ;; Cast, then put the watermark back where it was.
+        reaffirm (fn [st]
+                   (let [before (:voted-view st -1)
+                         [s2 out] (cast-vote st t now)]
+                     [(assoc s2 :voted-view before) out]))]
     (cond
       (zero? h) [state []]
 
       ;; Never voted here: the ordinary case.
-      (not (voted? state h)) (cast-vote state t now)
+      (not (voted? state h)) (reaffirm state)
 
       ;; Voted, and still holding the vote: re-send it rather than re-signing.
       mine
@@ -1460,7 +1485,7 @@
 
       ;; Voted, and no longer holding the vote — a restart. Cast it again for
       ;; the block we hold.
-      :else (cast-vote state t now))))
+      :else (reaffirm state))))
 
 (defn- handle-sync-response
   "Adopt a segment through `inga.sync`, or refuse it whole, and vote for what
