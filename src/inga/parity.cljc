@@ -117,8 +117,14 @@
   (letfn [(vote [block-hash]
             {:inga.vote/witness w :inga.vote/height h
              :inga.vote/block-hash block-hash
+             ;; SAME view on both, which is what makes this a crime rather
+             ;; than a view change. Without it the fixture stopped verifying
+             ;; and the digest quietly lost its APPLYING slash — both slashes
+             ;; refused, agreed on by both runtimes, and covering half of what
+             ;; the comment under `power-digest` says it covers.
+             :inga.vote/view 3
              :inga.vote/sig (str "sig:" w ":" h ":" block-hash)})]
-    {:inga.evidence/witness w :inga.evidence/height h
+    {:inga.evidence/witness w :inga.evidence/height h :inga.evidence/view 3
      :inga.evidence/vote-a (vote "block-a")
      :inga.evidence/vote-b (vote "block-b")}))
 

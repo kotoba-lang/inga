@@ -221,6 +221,15 @@
                 {"t" "evidence"
                  "witness" (wire-id (:inga.evidence/witness e))
                  "height" (:inga.evidence/height e)
+                 ;; The view the two votes share. Decorative for verification
+                 ;; -- `verify-equivocation-evidence` reads the views off the
+                 ;; VOTES, which is the authoritative place and the one a
+                 ;; forger cannot make disagree with itself -- but carried so
+                 ;; that evidence which has crossed the wire has the same
+                 ;; shape as evidence produced locally. An asymmetry there is
+                 ;; a field that is present in tests and absent in production.
+                 "view" (or (:inga.evidence/view e)
+                            (:inga.vote/view (:inga.evidence/vote-a e)) 0)
                  "vote-a" (enc-vote (:inga.evidence/vote-a e))
                  "vote-b" (enc-vote (:inga.evidence/vote-b e))})
     :sync-request (cond-> {"t" "sync-request" "from" (:from msg) "to" (:to msg)}
@@ -297,7 +306,8 @@
          ;; that recorded it on shape alone would let anyone frame anyone.
          (if (and (str-ok? (get m "witness") limits) (nat? (get m "height")) a b)
            [{:type :evidence
-             :evidence {:inga.evidence/witness (get m "witness")
+             :evidence {:inga.evidence/view (or (get m "view") (:inga.vote/view a))
+                        :inga.evidence/witness (get m "witness")
                         :inga.evidence/height (get m "height")
                         :inga.evidence/vote-a a
                         :inga.evidence/vote-b b}} nil]

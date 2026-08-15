@@ -280,15 +280,41 @@
 (defn detect-equivocation
   "Given `votes` (a coll of `inga.consensus/make-vote`-shaped maps, each
   carrying an `:inga.vote/sig`, from possibly many witnesses across
-  possibly many heights), find every pair sharing the SAME witness AND the
-  SAME height but a DIFFERENT block-hash — the objective, unambiguous
-  double-vote fingerprint. Returns a vector of evidence maps (empty if
-  clean), each `{:inga.evidence/witness :inga.evidence/height
-  :inga.evidence/vote-a :inga.evidence/vote-b}`."
+  possibly many heights), find every pair sharing the SAME witness, the SAME
+  height AND the SAME view but a DIFFERENT block-hash — the objective,
+  unambiguous double-vote fingerprint. Returns a vector of evidence maps
+  (empty if clean), each `{:inga.evidence/witness :inga.evidence/height
+  :inga.evidence/view :inga.evidence/vote-a :inga.evidence/vote-b}`.
+
+  ## The view is part of the key, and leaving it out convicts honest replicas
+
+  This grouped by `[witness height]` alone, which was right while a replica
+  voted at most once per HEIGHT. It stopped being right when the voting rule
+  became once per VIEW (`inga.replica`'s `voted-view`), and the two have to
+  agree about what a double-vote is or the protocol slashes for following
+  itself.
+
+  A view change is exactly this shape: a round fails to certify, the next
+  leader rebuilds on the highest QC, and an honest replica votes again at the
+  same height for a different block in a LATER view. That is not misbehaviour,
+  it is the mechanism by which a stalled chain recovers — and under the old
+  key every replica that helped a chain recover produced, and its peers
+  broadcast, a signed proof that it had equivocated.
+
+  Measured on the deployed devnet 2026-08-15 (root ADR-2608150300): after a
+  reset the chain ran clean, `equivocators` climbed 0 -> 1 -> 4 as views
+  turned over, and at four the chain stopped — four replicas each alone on
+  their own tip with one vote apiece. **The liveness mechanism was
+  manufacturing the evidence that disabled it.**
+
+  Within ONE view a witness has one leader and one proposal, so two different
+  block-hashes from one witness in one view is still the unambiguous crime it
+  always was. Narrowing the key strictly reduces what is convicted; it cannot
+  make an equivocator harder to catch than the honest replica it used to."
   [votes]
   (->> votes
-       (group-by (juxt :inga.vote/witness :inga.vote/height))
-       (mapcat (fn [[[witness height] group]]
+       (group-by (juxt :inga.vote/witness :inga.vote/height :inga.vote/view))
+       (mapcat (fn [[[witness height view] group]]
                  (let [distinct-hashes (distinct (map :inga.vote/block-hash group))]
                    (when (> (count distinct-hashes) 1)
                      (let [a (first group)
@@ -297,6 +323,7 @@
                                              group))]
                        [{:inga.evidence/witness witness
                          :inga.evidence/height height
+                         :inga.evidence/view view
                          :inga.evidence/vote-a a
                          :inga.evidence/vote-b b}])))))
        vec))
@@ -315,6 +342,24 @@
   (boolean
    (and (= witness (:inga.vote/witness vote-a) (:inga.vote/witness vote-b))
         (= height (:inga.vote/height vote-a) (:inga.vote/height vote-b))
+        ;; SAME VIEW, and both votes must actually say which one.
+        ;;
+        ;; This is the half that defends against a peer, and it is the half
+        ;; that matters: `detect-equivocation` only governs what THIS replica
+        ;; produces, while evidence arrives over the wire from replicas that
+        ;; may still be keying by `[witness height]` — and once recorded, a
+        ;; conviction is not revisited. A fix that only narrowed detection
+        ;; would leave every unfixed peer able to convict this replica of its
+        ;; own view changes.
+        ;;
+        ;; `nil` views fail rather than compare equal. A vote that does not
+        ;; say which view it was cast in cannot be shown to conflict with
+        ;; another in the same view, and refusing to convict on evidence one
+        ;; cannot evaluate is the only safe direction: the cost of declining a
+        ;; real equivocation is that it goes unpunished, and the cost of
+        ;; accepting a false one is an honest replica removed from the quorum.
+        (some? (:inga.vote/view vote-a))
+        (= (:inga.vote/view vote-a) (:inga.vote/view vote-b))
         (not= (:inga.vote/block-hash vote-a) (:inga.vote/block-hash vote-b))
         (verify-sig-fn vote-a)
         (verify-sig-fn vote-b))))

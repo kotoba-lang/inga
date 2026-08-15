@@ -1480,3 +1480,51 @@
         (is (> (apply min (map (fn [[_ s]] (r/committed-height s)) healed))
                (apply min (map (fn [[_ s]] (r/committed-height s)) partitioned)))
             "converged on a tip but committed nothing further")))))
+
+;; ── a view change is not a crime ────────────────────────────────────────────
+;;
+;; `fold-vote` kept the first signed vote per `[witness height]` and treated a
+;; second one for a different block as equivocation — broadcasting a signed
+;; proof of it. That was right while a replica voted once per HEIGHT. The
+;; voting rule is now once per VIEW, and a view change is precisely "vote
+;; again at this height, for a different block, in a later view".
+;;
+;; Measured on the deployed devnet 2026-08-15 (root ADR-2608150300): after a
+;; reset the chain ran clean, `equivocators` went 0 -> 1 -> 4 as views turned
+;; over, and at four it stopped — four replicas each alone on their own tip
+;; with one vote apiece. The liveness mechanism was manufacturing the evidence
+;; that disabled it.
+
+(defn- signed-vote-msg
+  "A genuinely signed vote message from `w`. The signature covers the VIEW, so
+  a fixture that reused one string across views would be testing nothing the
+  verifier does."
+  [w block-hash height view]
+  {:type :vote :witness w :block-hash block-hash :height height :view view
+   :sig ((fake-sign w) (att/vote-payload chain view height block-hash w))})
+
+(deftest a-replica-voting-again-in-a-later-view-is-not-recorded-as-equivocating
+  (let [s (checked-replica :w1)
+        ;; w2 votes at height 3 in view 7, then again at height 3 in view 8
+        ;; for a different block. Honest: that is a view change.
+        [s1 out1] (r/on-message s (signed-vote-msg "w2" "hA" 3 7) 1000)
+        [s2 out2] (r/on-message s1 (signed-vote-msg "w2" "hB" 3 8) 1001)]
+    (testing "no evidence is recorded"
+      (is (empty? (:equivocations s2))
+          (str "recorded: " (pr-str (:equivocations s2)))))
+    (testing "and none is broadcast — the proof travels, so producing one
+              falsely convicts the witness everywhere, not just here"
+      (is (empty? (filter #(= :evidence (:type (:msg %))) (concat out1 out2)))))
+    (testing "w2 is not in the equivocator set"
+      (is (not (contains? (set (r/equivocators s2)) "w2"))))))
+
+(deftest two-blocks-at-one-height-in-ONE-view-is-still-recorded
+  (testing "narrowing the key must not stop a real equivocator being caught —
+            otherwise this change trades a liveness bug for a safety hole"
+    (let [s (checked-replica :w1)
+          [s1 _] (r/on-message s (signed-vote-msg "w2" "hA" 3 7) 1000)
+          [s2 out] (r/on-message s1 (signed-vote-msg "w2" "hB" 3 7) 1001)]
+      (is (seq (:equivocations s2)) "the crime must still be recorded")
+      (is (seq (filter #(= :evidence (:type (:msg %))) out))
+          "and still forwarded")
+      (is (contains? (set (r/equivocators s2)) "w2")))))
