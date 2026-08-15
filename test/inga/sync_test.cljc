@@ -198,3 +198,99 @@
                                    :inga.qc/view 1 :inga.qc/witnesses #{:w1}
                                    :inga.qc/vote-count 1}}]
       (is (= :below-quorum (sync/validate-segment h 3 b1 [b2] params))))))
+
+;; ── rewinding onto a branch that replaces an uncertified suffix ─────────────
+;;
+;; `sync-step` anchored at the tip and nowhere else, so a segment could only be
+;; APPENDED. That is right for a replica that is BEHIND and cannot resolve a
+;; fork, where a replica is BESIDE: its tip is at the same height as its peers'
+;; and a different block, so every segment they can offer starts at or below
+;; that height and is refused `:does-not-attach` — the one answer that
+;; describes the situation exactly and does nothing about it.
+
+(defn- fork-at
+  "A chain of `n` certified blocks, and a rival block at height `n` proposed by
+  somebody else — two blocks at one height, which is what a fork IS."
+  [n]
+  (let [main (honest-chain n)
+        parent (nth main (dec n))
+        rival (blk n (h parent) :w2 (qc-for parent [:w1 :w2 :w3]))]
+    {:chain main :rival rival :parent parent}))
+
+(deftest a-conflicting-certified-branch-replaces-an-uncertified-suffix
+  (let [{:keys [chain rival]} (fork-at 3)
+        ;; the rival branch, certified past the fork point
+        rival-child (blk 4 (h rival) :w1 (qc-for rival [:w1 :w2 :w3]))
+        r (sync/sync-step h quorum chain [rival rival-child]
+                          (assoc params :floor 1))]
+    (is (= :rewound (:reason r)))
+    (is (= 2 (:adopted r)))
+    (testing "the losing block is gone and the incoming branch is the chain"
+      (is (= ["H0/:w1" "H1/:w1" "H2/:w1" "H3/:w2" "H4/:w1"]
+             (mapv h (:chain r)))))
+    (testing "and it reports how much of our own history it discarded, because
+              silently replacing blocks is the one thing sync must never do
+              quietly"
+      (is (= 1 (:discarded r))))))
+
+(deftest a-segment-that-only-echoes-what-we-hold-is-not-a-rewind
+  (testing "a peer re-offering blocks we already have overlaps completely and
+            disagrees with none of it. Rewinding onto that would discard a
+            suffix to put back identical blocks — and since adopting is what
+            makes a replica vote, it would cast a second vote at a height
+            already voted at. Equivocation, produced by the fork repair, against
+            a peer doing nothing wrong."
+    (let [chain (honest-chain 3)
+          echo [(nth chain 3)]
+          r (sync/sync-step h quorum chain echo (assoc params :floor 1))]
+      (is (zero? (:adopted r)))
+      (is (= :does-not-attach (:reason r)))
+      (is (= chain (:chain r)) "the chain is untouched"))))
+
+(deftest a-rewind-may-never-replace-a-committed-block
+  (testing "committed is final under the 3-chain rule, so a quorum-certified
+            segment that contradicts it is not a fork to resolve — it is a
+            safety alarm, and it gets its own name so it can never be read as
+            ordinary sync noise"
+    (let [{:keys [chain rival]} (fork-at 3)
+          rival-child (blk 4 (h rival) :w1 (qc-for rival [:w1 :w2 :w3]))
+          r (sync/sync-step h quorum chain [rival rival-child]
+                            ;; height 3 is committed
+                            (assoc params :floor 3))]
+      (is (zero? (:adopted r)))
+      (is (= :below-commit (:reason r)))
+      (is (= chain (:chain r))))))
+
+(deftest without-a-floor-the-old-append-only-behaviour-is-unchanged
+  (testing "an existing caller that has not been taught about forks must not
+            silently gain the ability to discard its own history"
+    (let [{:keys [chain rival]} (fork-at 3)
+          rival-child (blk 4 (h rival) :w1 (qc-for rival [:w1 :w2 :w3]))
+          r (sync/sync-step h quorum chain [rival rival-child] params)]
+      (is (zero? (:adopted r)))
+      (is (= :below-commit (:reason r))
+          "the default floor is the tip, so nothing above it can be replaced"))))
+
+(deftest a-conflicting-branch-that-does-not-validate-is-refused-whole
+  (testing "no certified-prefix salvage on the rewind path: replacing a suffix
+            is justified only by the incoming branch being one a quorum
+            certified, and a segment trimmed to make it valid is not that —
+            trimming here would let a peer choose how far back we go"
+    (let [{:keys [chain rival]} (fork-at 3)
+          ;; certified by two witnesses, which is below the quorum of three
+          weak-child (blk 4 (h rival) :w1 (qc-for rival [:w1 :w2]))
+          r (sync/sync-step h quorum chain [rival weak-child]
+                            (assoc params :floor 1))]
+      (is (zero? (:adopted r)))
+      (is (= chain (:chain r)) "nothing was adopted, not even the valid prefix"))))
+
+(deftest conflicts-with-chain-answers-only-about-shared-heights
+  (let [chain (honest-chain 3)
+        {:keys [rival]} (fork-at 3)]
+    (is (true? (sync/conflicts-with-chain? h chain [rival]))
+        "a different block at a height we hold")
+    (is (false? (sync/conflicts-with-chain? h chain [(nth chain 2)]))
+        "the same block at a height we hold")
+    (is (false? (sync/conflicts-with-chain? h chain
+                                            [(blk 9 "somewhere" :w1 nil)]))
+        "a height we do not hold is not a conflict, it is a gap")))

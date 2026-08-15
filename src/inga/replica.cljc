@@ -1313,7 +1313,15 @@
                         ;; sync response was the one way into a replica that
                         ;; nothing checked.
                         (assoc sync/default-params
-                               :witnesses (:witnesses state))
+                               :witnesses (:witnesses state)
+                               ;; Nothing at or below the commit line may be
+                               ;; replaced. Passing it explicitly is what turns
+                               ;; `sync-step`'s rewind from "trust the peer" into
+                               ;; "trust the peer above the point a quorum has
+                               ;; already finalised" — and `:below-commit` names
+                               ;; the refusal so a real safety alarm can never be
+                               ;; read as ordinary sync noise.
+                               :floor (committed-height state))
                         (:chain-id state) (:verify-fn state))
         ;; Refusing a segment says nothing to anybody, correctly — and a
         ;; replica that cannot catch up looks exactly like a replica nobody is
@@ -1358,7 +1366,8 @@
                               :to (:inga.block/height (last segment))
                               :adopted adopted
                               :reason reason}
-                       detail (assoc :detail detail)))]
+                       detail (assoc :detail detail)))
+]
     (if (pos? adopted)
       (-> state
           (assoc :chain chain)

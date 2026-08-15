@@ -1347,3 +1347,136 @@
       (let [[_ out] (r/on-tick s' 60000)]
         (is (<= (count (filter #(= :sync-request (:type (:msg %))) out)) 1)
             "stopped asking altogether")))))
+
+;; ── a partition that leaves two branches standing ───────────────────────────
+;;
+;; ADR-2800004800 §1d recorded the stall this section reproduces, measured on
+;; the deployed devnet after the equivocation fixes had cleared everything
+;; else:
+;;
+;;     w2  h 1031  view 1039  no-certificate-for-the-tip  tip-cert false votes 1
+;;         last-proposal 1030 -> locked-elsewhere
+;;     w4  h 1030  view 1050  no-certificate-for-the-tip  tip-cert false votes 1
+;;         last-proposal 1031 -> no-parent
+;;
+;; Two branches, one vote each, and neither replica able to add to the other's:
+;; w4 does not HOLD the parent of 1031, and w2 REFUSES 1030 because its lock
+;; points elsewhere. The ADR named the next step — "put two branches that both
+;; miss quorum into the harness, so this can be reproduced outside
+;; production" — and this is it.
+;;
+;; The two refusals are different in kind and only one of them is a bug:
+;; `locked-elsewhere` is the safety rule doing its job, and must survive.
+;; `no-parent` is a replica missing a block its peers hold, which is what sync
+;; exists to fix. A test that only asserted "the chain recovers" could pass by
+;; weakening the lock, so the assertions below pin both.
+
+(defn- deliver-partitioned
+  "`deliver-all`, with a `reachable?` predicate over [from to].
+
+  Messages that do not cross are DROPPED, not queued: a partition that
+  delivers everything late is a slow network, and the condition being
+  reproduced here needs two sides that genuinely never heard each other."
+  [replicas outbox now max-steps reachable?]
+  (loop [rs replicas ob outbox t now steps 0]
+    (if (or (empty? ob) (>= steps max-steps))
+      [rs ob steps]
+      (let [[{:keys [from to msg]} & more] ob
+            targets (if (= :all to) (sort (keys rs)) [to])
+            [rs' produced]
+            (reduce (fn [[rs acc] w]
+                      (if (or (= w from) (not (reachable? from w)))
+                        [rs acc]
+                        (let [[s' out] (r/on-message (get rs w) msg t)]
+                          [(assoc rs w s')
+                           (into acc (map #(assoc % :from w) out))])))
+                    [rs []]
+                    targets)]
+        (recur rs' (vec (concat more produced)) (+ t 1) (inc steps))))))
+
+(defn- tick-all
+  "One round of ticks for every replica, delivered under `reachable?`."
+  [rs t max-steps reachable?]
+  (let [{:keys [rs ob]}
+        (reduce (fn [acc w]
+                  (let [[s' out] (r/on-tick (get (:rs acc) w) t)]
+                    (-> acc
+                        (update :rs assoc w s')
+                        (update :ob into (map #(assoc % :from w) out)))))
+                {:rs rs :ob []}
+                (sort (keys rs)))
+        [rs' _ _] (deliver-partitioned rs (vec ob) t max-steps reachable?)]
+    rs'))
+
+(defn- run-ticks
+  "Tick the network over `ts` under `reachable?`."
+  [rs ts reachable?]
+  (reduce (fn [rs t] (tick-all rs t 4000 reachable?)) rs ts))
+
+(def ^:private split
+  "{:w1 :w2} on one side, {:w3 :w4} on the other. With n=4 the quorum is 3, so
+  NEITHER side can certify anything — which is the whole point. A 3/1 split
+  would let the majority carry on and would be testing something else."
+  (let [side {:w1 0 :w2 0 :w3 1 :w4 1}]
+    (fn [from to] (= (side from) (side to)))))
+
+(def ^:private connected (constantly true))
+
+(defn- blocks-per-height
+  "height -> the set of DISTINCT block hashes any replica holds at it.
+
+  A height with more than one entry is a fork, and this is the only assertion
+  that says so. Comparing TIPS does not: two replicas one block apart have two
+  different tips and no fork at all, which is what the first version of the
+  test below actually reproduced while claiming otherwise."
+  [replicas]
+  (reduce (fn [acc [_ s]]
+            (reduce (fn [a b]
+                      (update a (:inga.block/height b) (fnil conj #{}) (hash-fn b)))
+                    acc (:chain s)))
+          {}
+          replicas))
+
+(defn- forked-heights [replicas]
+  (vec (sort (keys (filter (fn [[_ v]] (> (count v) 1)) (blocks-per-height replicas))))))
+
+(deftest two-branches-neither-reaching-quorum-still-recover
+  (let [healthy (run)
+        ;; Partition. Neither side can certify, so neither can propose past its
+        ;; own uncertified tip — the split alone does not fork the chain, it
+        ;; leaves one side holding one extra uncertified block.
+        partitioned (run-ticks healthy (range 3000 4200 100) split)]
+
+    (testing "nothing was committed on either side: a 2/2 split cannot reach a
+              quorum of 3, which is what makes the next part possible"
+      (is (= 27 (apply max (map (fn [[_ s]] (r/committed-height s)) partitioned)))
+          "a side committed with only two replicas"))
+
+    ;; The FORK forms on healing, not in the split: the side that stayed behind
+    ;; leads a round, proposes its own block at the height the other side
+    ;; already filled, and now two blocks exist at one height with one vote
+    ;; each. Measured with the rewind disabled: all four replicas at height 29,
+    ;; height 29 holding two distinct blocks, and no further progress ever —
+    ;; the shape ADR-2800004800 §1d recorded on the devnet at 1030/1031.
+    (let [healed (run-ticks partitioned (range 5000 7000 100) connected)
+          heights (into {} (map (fn [[w s]] [w (r/height s)]) healed))]
+
+      (testing "SAFETY: no two replicas committed different blocks"
+        (let [chains (map (fn [[_ s]] (mapv hash-fn (:committed s))) healed)
+              shortest (apply min (map count chains))]
+          (is (apply = (map #(take shortest %) chains))
+              "replicas committed different blocks at the same heights")))
+
+      (testing "the fork is RESOLVED — no height is left holding two blocks"
+        (is (= [] (forked-heights healed))
+            (str "heights still forked: " (forked-heights healed)
+                 " at " heights)))
+
+      (testing "and the chain moves again rather than agreeing to be stuck:
+                converging on a frozen tip would satisfy the assertion above"
+        (is (> (apply min (vals heights))
+               (apply min (map (fn [[_ s]] (r/height s)) partitioned)))
+            (str "no replica advanced after healing: " heights))
+        (is (> (apply min (map (fn [[_ s]] (r/committed-height s)) healed))
+               (apply min (map (fn [[_ s]] (r/committed-height s)) partitioned)))
+            "converged on a tip but committed nothing further")))))

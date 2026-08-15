@@ -60,7 +60,12 @@
     :uncertified
     :does-not-link
     :below-quorum
-    :wrong-proposer})
+    :wrong-proposer
+    ;; A segment that would replace a COMMITTED block. Distinct from
+    ;; `:does-not-attach` on purpose: that one means "I cannot use this", this
+    ;; one means "a quorum told me something that contradicts what a quorum
+    ;; already finalised", which is a safety alarm and not a sync problem.
+    :below-commit})
 
 ;; ── what to ask for ─────────────────────────────────────────────────────────
 
@@ -253,6 +258,105 @@
   [chain segment]
   (into (vec chain) segment))
 
+;; ── rewinding onto a branch that replaces an uncertified suffix ─────────────
+;;
+;; `sync-step` anchored at `(last chain)` and nowhere else, so a segment could
+;; only ever be APPENDED. That is right for a replica that is merely behind,
+;; and it cannot resolve a fork: a replica holding a losing branch is not
+;; behind, it is beside. Its tip is at the same height as its peers' and a
+;; different block, so every segment they can offer starts at or below that
+;; height and is refused `:does-not-attach` — the one answer that describes the
+;; situation correctly and does nothing about it.
+;;
+;; Measured in `inga.replica-test`: a 2/2 partition leaves two branches, and
+;; after healing all four replicas sit at one height on two tips with
+;; `last-sync {:offered 1 :adopted 0 :reason :does-not-attach}`, forever. It is
+;; the same shape ADR-2800004800 §1d recorded on the deployed devnet at heights
+;; 1030/1031, where one replica reported `no-parent` for a block the other side
+;; had built on.
+
+(defn chain-through
+  "The prefix of `chain` up to and including height `h`, or nil when the chain
+  does not reach that height."
+  [chain h]
+  (let [prefix (vec (take-while #(<= (:inga.block/height %) h) chain))]
+    (when (and (seq prefix) (= h (:inga.block/height (peek prefix))))
+      prefix)))
+
+(defn conflicts-with-chain?
+  "Does `segment` name a DIFFERENT block than `chain` holds at some height they
+  both cover?
+
+  This is what separates a fork from an echo. A peer re-offering blocks the
+  replica already has overlaps its chain completely and disagrees with none of
+  it; rewinding onto that would discard a suffix in order to put back the
+  identical blocks, and — because adopting is what triggers a vote — would cast
+  a second vote at a height already voted at. Which is equivocation, produced
+  by the machinery meant to repair a fork, against a peer doing nothing wrong.
+
+  Caught by `catching-up-does-not-vote-twice`, which existed for exactly this
+  and was the only thing standing between the rewind and a self-inflicted
+  slashable offence."
+  [hash-fn chain segment]
+  (let [by-height (into {} (map (juxt :inga.block/height identity)) chain)]
+    (boolean (some (fn [b]
+                     (when-let [mine (get by-height (:inga.block/height b))]
+                       (not= (hash-fn mine) (hash-fn b))))
+                   segment))))
+
+(defn rewind-target
+  "Where a segment starting at `start` would attach, given `chain` and the
+  height at or below which nothing may be discarded (`floor`).
+
+  Returns `{:prefix [...] :anchor b}` or a refusal keyword. The floor is the
+  caller's committed height: committed blocks are final under the 3-chain
+  rule, so a segment that would replace one is not a fork to be resolved but a
+  safety violation to be refused — and refusing it by NAME is what keeps that
+  distinction readable in the one place it will ever matter."
+  [chain start floor]
+  (cond
+    (<= start floor) :below-commit
+    :else (if-let [prefix (chain-through chain (dec start))]
+            {:prefix prefix :anchor (peek prefix)}
+            :does-not-attach)))
+
+(defn- sync-step-append
+  "The original append-only body of `sync-step`, unchanged."
+  [hash-fn quorum chain segment params chain-id verify-fn]
+   (let [anchor (last chain)]
+     (if-let [reason (validate-segment hash-fn quorum anchor segment params
+                                       chain-id verify-fn)]
+       (if (not= :below-quorum reason)
+         ;; Structural: the segment is not what it claims to be. Whole refusal
+         ;; is the only safe answer, and the argument this function was
+         ;; written with applies unchanged.
+         {:chain chain :adopted 0 :reason reason}
+         ;; Certificates: find where they stop and keep what is behind it.
+         (let [;; `admitted?` is a PREDICATE built from the witness list, not the
+               ;; list. Passing the list itself threw "Key must be integer" out
+               ;; of the certificate verifier -- the same mistake the
+               ;; `first-uncertified` docstring warns about, one layer down.
+               bad (first-uncertified quorum segment chain-id verify-fn
+                                      (when-let [ws (:witnesses params)]
+                                        (wire/admits ws)))
+               idx (when bad
+                     (first (keep-indexed
+                             #(when (= (:inga.block/height %2)
+                                       (:inga.block/height bad)) %1)
+                             segment)))
+               prefix (if idx (subvec (vec segment) 0 idx) [])]
+           (if (empty? prefix)
+             {:chain chain :adopted 0 :reason reason}
+             ;; Re-validated, not assumed: the prefix has to stand on its own
+             ;; against the same anchor, or this would be trusting the shape
+             ;; of a segment that already failed once.
+             (if-let [r2 (validate-segment hash-fn quorum anchor prefix params
+                                           chain-id verify-fn)]
+               {:chain chain :adopted 0 :reason r2}
+               {:chain (adopt chain prefix) :adopted (count prefix)
+                :reason :uncertified-tail-only}))))
+       {:chain (adopt chain segment) :adopted (count segment)})))
+
 (defn sync-step
   "One round of catching up. Returns
   `{:chain c :adopted n}` on success or `{:chain c :adopted 0 :reason r}`.
@@ -291,36 +395,34 @@
   ([hash-fn quorum chain segment params]
    (sync-step hash-fn quorum chain segment params nil nil))
   ([hash-fn quorum chain segment params chain-id verify-fn]
-   (let [anchor (last chain)]
-     (if-let [reason (validate-segment hash-fn quorum anchor segment params
-                                       chain-id verify-fn)]
-       (if (not= :below-quorum reason)
-         ;; Structural: the segment is not what it claims to be. Whole refusal
-         ;; is the only safe answer, and the argument this function was
-         ;; written with applies unchanged.
-         {:chain chain :adopted 0 :reason reason}
-         ;; Certificates: find where they stop and keep what is behind it.
-         (let [;; `admitted?` is a PREDICATE built from the witness list, not the
-               ;; list. Passing the list itself threw "Key must be integer" out
-               ;; of the certificate verifier -- the same mistake the
-               ;; `first-uncertified` docstring warns about, one layer down.
-               bad (first-uncertified quorum segment chain-id verify-fn
-                                      (when-let [ws (:witnesses params)]
-                                        (wire/admits ws)))
-               idx (when bad
-                     (first (keep-indexed
-                             #(when (= (:inga.block/height %2)
-                                       (:inga.block/height bad)) %1)
-                             segment)))
-               prefix (if idx (subvec (vec segment) 0 idx) [])]
-           (if (empty? prefix)
-             {:chain chain :adopted 0 :reason reason}
-             ;; Re-validated, not assumed: the prefix has to stand on its own
-             ;; against the same anchor, or this would be trusting the shape
-             ;; of a segment that already failed once.
-             (if-let [r2 (validate-segment hash-fn quorum anchor prefix params
+   (let [;; `:floor` is the caller's committed height. Absent, it defaults to
+         ;; the tip, which reduces this to the append-only behaviour it had
+         ;; before rewinding existed — an existing caller that has not been
+         ;; taught about forks keeps exactly its old semantics rather than
+         ;; silently gaining the ability to discard its own history.
+         tip-h (:inga.block/height (last chain) -1)
+         floor (:floor params tip-h)
+         start (:inga.block/height (first segment))
+         rewind? (and (seq segment) (integer? start) (<= start tip-h)
+                      (conflicts-with-chain? hash-fn chain segment))
+         target (when rewind? (rewind-target chain start floor))]
+     (cond
+       (keyword? target)
+       {:chain chain :adopted 0 :reason target}
+
+       rewind?
+       (let [{:keys [prefix anchor]} target]
+         (if-let [reason (validate-segment hash-fn quorum anchor segment params
                                            chain-id verify-fn)]
-               {:chain chain :adopted 0 :reason r2}
-               {:chain (adopt chain prefix) :adopted (count prefix)
-                :reason :uncertified-tail-only}))))
-       {:chain (adopt chain segment) :adopted (count segment)}))))
+           ;; No certified-prefix salvage on the rewind path. Replacing a
+           ;; suffix is only justified by the incoming branch being one a
+           ;; quorum certified; a segment we had to trim to make valid is not
+           ;; that, and trimming it here would let a peer choose how far back
+           ;; we go.
+           {:chain chain :adopted 0 :reason reason}
+           {:chain (adopt prefix segment) :adopted (count segment)
+            :reason :rewound
+            :discarded (- tip-h (dec start))}))
+
+       :else
+       (sync-step-append hash-fn quorum chain segment params chain-id verify-fn)))))
