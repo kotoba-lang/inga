@@ -16,14 +16,25 @@
 ;; verifier is injected, the same division of labour every other seam here uses
 ;; -- this namespace has no crypto and must not grow any.
 
-(defn- vote [w h block-hash]
-  {:inga.vote/witness w :inga.vote/height h :inga.vote/block-hash block-hash
-   :inga.vote/sig (str "sig:" w ":" h ":" block-hash)})
+(defn- vote
+  "A signed vote, carrying the VIEW it was cast in.
+
+  The view is not decoration: equivocation is defined per view, so evidence
+  whose votes do not say which view they were cast in cannot be shown to
+  conflict and `verify-equivocation-evidence` refuses it. A fixture without
+  one is not a production shape — `inga.replica/fold-vote` assoc's a view onto
+  every vote it handles."
+  ([w h block-hash] (vote w h block-hash 0))
+  ([w h block-hash view]
+   {:inga.vote/witness w :inga.vote/height h :inga.vote/block-hash block-hash
+    :inga.vote/view view
+    :inga.vote/sig (str "sig:" w ":" h ":" block-hash)}))
 
 (defn- equivocation
-  "A genuine double-vote by `w` at `h`: same witness, same height, two blocks."
+  "A genuine double-vote by `w` at `h`: same witness, same height, SAME VIEW,
+  two blocks. Same view is what makes it a crime rather than a view change."
   [w h]
-  {:inga.evidence/witness w :inga.evidence/height h
+  {:inga.evidence/witness w :inga.evidence/height h :inga.evidence/view 0
    :inga.evidence/vote-a (vote w h "block-a")
    :inga.evidence/vote-b (vote w h "block-b")})
 
@@ -240,3 +251,22 @@
       (is (vector? (:slashes t)))
       (is (= 2 (count (:slashes t))))
       (is (= #{["w1" 7] ["w2" 8]} (:punished t))))))
+
+
+;; ── a view change must not cost a witness its bond ──────────────────────────
+
+(deftest a-slash-built-from-a-view-change-is-refused
+  (testing "the failure this whole per-view change exists to stop, seen from
+            the money end: an honest replica that voted again at one height in
+            a LATER view (a view change, the mechanism by which a stalled
+            chain recovers) must not be slashable for it"
+    (let [view-change {:inga.evidence/witness "w1" :inga.evidence/height 7
+                       :inga.evidence/vote-a (vote "w1" 7 "block-a" 7)
+                       :inga.evidence/vote-b (vote "w1" 7 "block-b" 8)}
+          evs [{:event :bond :witness "w1" :amount 100 :roles #{:ordering}}
+               {:event :slash :witness "w1" :terms {} :evidence view-change}]
+          t (table-after evs)]
+      (is (= {"w1" {:evidence-did-not-verify 1}} (:rejected-slashes t))
+          "refused, and named as unverifiable rather than silently ignored")
+      (is (some? (get-in t [:bonds "w1"])) "the bond survives")
+      (is (= 100 (get-in t [:bonds "w1" :amount]))))))

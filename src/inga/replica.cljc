@@ -860,13 +860,21 @@
     (let [vote (cond-> (assoc (c/make-vote witness block-hash height)
                               :inga.vote/view view)
                  sig (assoc :inga.vote/sig sig))
-          prior (get-in state [:first-vote [witness height]])]
+          ;; Keyed by VIEW as well as height, because that is what the voting
+          ;; rule is keyed by. A replica may vote at one height in several
+          ;; views — that is a view change, and it is how a stalled chain
+          ;; recovers — so `[witness height]` called every recovering replica
+          ;; an equivocator and broadcast a signed proof of it. See
+          ;; `inga.stake/detect-equivocation` for the measurement.
+          prior (get-in state [:first-vote [witness height view]])]
      (if (and prior (not= (:inga.vote/block-hash prior) block-hash))
-       ;; Both signed, both verifying, both from this witness at this height,
-       ;; for different blocks. Refused, and kept: an equivocator that is
-       ;; merely ignored pays nothing and can do it again next height.
+       ;; Both signed, both verifying, both from this witness at this height
+       ;; IN THIS VIEW, for different blocks. Refused, and kept: an
+       ;; equivocator that is merely ignored pays nothing and can do it again
+       ;; next height.
        (let [e {:inga.evidence/witness witness
                 :inga.evidence/height height
+                :inga.evidence/view view
                 :inga.evidence/vote-a prior
                 :inga.evidence/vote-b vote}]
          ;; Broadcast, not just kept. Evidence that stays in the replica that
@@ -876,7 +884,7 @@
          ;; network fact instead of one node's private opinion.
          [(record-evidence state e)
           [{:to :all :msg {:type :evidence :evidence e}}]])
-    (let [state (assoc-in state [:first-vote [witness height]]
+    (let [state (assoc-in state [:first-vote [witness height view]]
                           (or prior vote))
           state (update-in state [:votes block-hash] (fnil assoc {}) witness
                          vote)

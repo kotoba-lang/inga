@@ -110,8 +110,17 @@
 
 ;; ── equivocation detection / verification ────────────────────────────────────
 
-(defn- signed-vote [witness block-hash height sig]
-  (assoc (consensus/make-vote witness block-hash height) :inga.vote/sig sig))
+(defn- signed-vote
+  "A signed vote, carrying the VIEW it was cast in.
+
+  `make-vote` does not set a view; `inga.replica/fold-vote` assoc's one on
+  every vote it handles, so a fixture without one is not a production shape.
+  It mattered: equivocation is defined per view, and a helper that left the
+  field nil made every test here exercise the `nil = nil` case."
+  ([witness block-hash height sig] (signed-vote witness block-hash height sig 0))
+  ([witness block-hash height sig view]
+   (assoc (consensus/make-vote witness block-hash height)
+          :inga.vote/sig sig :inga.vote/view view)))
 
 (deftest detect-equivocation-finds-conflicting-pair
   (let [votes [(signed-vote "w1" "blockA" 10 "sigA")
@@ -303,3 +312,62 @@
                  "c" {:amount 0 :roles #{:ordering}}}]
       (is (false? (:met? (stake/quorum-met? #{"a"} bonds ["a" "a" "a" "b" "c"])))
           "a repeated witness is still one witness"))))
+
+
+;; ── equivocation is per VIEW, not per height ────────────────────────────────
+;;
+;; The voting rule is one vote per view (`inga.replica`'s `voted-view`), so a
+;; replica may vote at one height in several views — that is a view change,
+;; and it is how a stalled chain recovers. While this ns keyed on
+;; `[witness height]` the two disagreed about what a double-vote is, and the
+;; protocol slashed for following itself: measured on the deployed devnet
+;; 2026-08-15, `equivocators` climbed 0 -> 1 -> 4 as views turned over and the
+;; chain stopped at four, each replica alone on its own tip.
+
+(deftest a-view-change-is-not-equivocation
+  (testing "same witness, same height, different block, LATER view — this is
+            the recovery mechanism, not a crime"
+    (let [votes [(signed-vote "w1" "blockA" 10 "sigA" 7)
+                 (signed-vote "w1" "blockB" 10 "sigB" 8)]]
+      (is (= [] (stake/detect-equivocation votes))))))
+
+(deftest two-blocks-in-ONE-view-is-still-equivocation
+  (testing "narrowing the key must not make a real equivocator harder to catch"
+    (let [votes [(signed-vote "w1" "blockA" 10 "sigA" 7)
+                 (signed-vote "w1" "blockB" 10 "sigB" 7)]
+          [e :as evidence] (stake/detect-equivocation votes)]
+      (is (= 1 (count evidence)))
+      (is (= "w1" (:inga.evidence/witness e)))
+      (is (= 10 (:inga.evidence/height e)))
+      (is (= 7 (:inga.evidence/view e))))))
+
+(deftest evidence-whose-votes-are-in-different-views-does-not-verify
+  (testing "the half that defends against a PEER. detect-equivocation only
+            governs what this replica produces; evidence arrives over the wire
+            from replicas that may still key by [witness height], and a
+            conviction is not revisited once recorded."
+    (let [verify-fn (constantly true)
+          forged {:inga.evidence/witness "w1"
+                  :inga.evidence/height 10
+                  :inga.evidence/vote-a (signed-vote "w1" "blockA" 10 "sigA" 7)
+                  :inga.evidence/vote-b (signed-vote "w1" "blockB" 10 "sigB" 8)}]
+      (is (false? (stake/verify-equivocation-evidence forged verify-fn))
+          "an honest view change, submitted as evidence, must not convict")
+      (testing "and the same pair in one view still does"
+        (is (true? (stake/verify-equivocation-evidence
+                    (assoc forged :inga.evidence/vote-b
+                           (signed-vote "w1" "blockB" 10 "sigB" 7))
+                    verify-fn)))))))
+
+(deftest evidence-that-does-not-say-which-view-does-not-verify
+  (testing "refusing to convict on evidence one cannot evaluate is the only
+            safe direction: an unpunished equivocation costs less than an
+            honest replica removed from the quorum"
+    (let [verify-fn (constantly true)
+          viewless {:inga.evidence/witness "w1"
+                    :inga.evidence/height 10
+                    :inga.evidence/vote-a (dissoc (signed-vote "w1" "blockA" 10 "sigA" 7)
+                                                  :inga.vote/view)
+                    :inga.evidence/vote-b (dissoc (signed-vote "w1" "blockB" 10 "sigB" 7)
+                                                  :inga.vote/view)}]
+      (is (false? (stake/verify-equivocation-evidence viewless verify-fn))))))
