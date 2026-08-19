@@ -53,13 +53,23 @@
   (:require [inga.head :as head]
             [kotobase.storage.core :as storage]))
 
-(defn- current-head [{:keys [read-head! quorum verify-fn admitted?]} ref-name]
+(defn- current-head [{:keys [read-head! quorum verify-fn admitted? head-of!]} ref-name]
   ;; `ref-name` goes to the verifier as well as the reader: `read-head!` is a
   ;; dumb, untrusted pointer and may answer with another ref's genuinely
   ;; certified head. See `head/verify-head`.
-  (head/verify-head (read-head! ref-name) ref-name quorum verify-fn admitted?))
+  ;;
+  ;; `head-of!` replaces the pair when a deployment proves its heads some
+  ;; other way. One seam rather than a verifier alongside `read-head!`,
+  ;; because a commitment proof travels WITH the read — the block and the
+  ;; certificate come from the same answer — and splitting them would leave
+  ;; `read-head!` returning a head and the verifier needing something it was
+  ;; never handed. See `inga.commitment`.
+  (if head-of!
+    (head-of! ref-name)
+    (head/verify-head (read-head! ref-name) ref-name quorum verify-fn admitted?)))
 
-(defrecord QuorumRefStore [read-head! write-head! propose! verify-fn admitted? quorum height-fn]
+(defrecord QuorumRefStore [read-head! write-head! propose! verify-fn admitted? quorum
+                          height-fn head-of!]
   storage/IRefStore
   (-read-ref [this ref-name]
     (when-let [h (current-head this ref-name)]
@@ -118,23 +128,55 @@
 
 (defn ref-store
   "Build the ref store. Every seam is required except `height-fn`, which is
-  nil for deployments whose quorum has no chain height to report."
-  [{:keys [read-head! write-head! propose! verify-fn admitted? quorum height-fn]}]
-  (doseq [[k v] {:read-head! read-head! :write-head! write-head!
-                 :propose! propose! :verify-fn verify-fn
-                 ;; `admitted?` is a seam like the others and REQUIRED like
-                 ;; the others. A store built without it would verify
-                 ;; signatures from keys nobody admitted -- see
-                 ;; `inga.head/verify-cert`. A set satisfies `ifn?`, so the
-                 ;; ordinary `#{"w1" "w2" "w3"}` passes straight through.
-                 :admitted? admitted?}]
+  nil for deployments whose quorum has no chain height to report.
+
+  ## Two ways to answer `what is the verified head of this ref`
+
+  Either `read-head!` with `verify-fn`/`admitted?`/`quorum` — a dumb pointer
+  plus a certificate over the head record — or **`head-of!`**, one function
+  that reads and verifies however that deployment proves a head.
+
+  `head-of!` exists because inga's own consensus does not sign head records.
+  Its witnesses sign `inga.attest/vote-payload`, which covers a BLOCK HASH,
+  so no quorum certificate satisfies `head/verify-cert` and until
+  `inga.commitment` the only thing that ever implemented `propose!` was a
+  cooperative oracle. Superproject ADR-2608198200 has the measurement. A
+  deployment that does have witnesses sign head records keeps the first form
+  and nothing about it changes.
+
+  With `head-of!`, `write-head!` is usually a no-op: a commitment plane
+  publishes the head by committing it, and `propose!` has already awaited
+  that commit, so the read-back below sees it. The read-back is still worth
+  running — it is the difference between `the quorum decided` and `and it is
+  readable`."
+  [{:keys [read-head! write-head! propose! verify-fn admitted? quorum height-fn
+           head-of!]}]
+  (doseq [[k v] (cond-> {:write-head! write-head! :propose! propose!}
+                  ;; Required only in the form that uses them. Demanding a
+                  ;; `verify-fn` from a deployment whose verification lives in
+                  ;; `head-of!` would make it invent one that is never called,
+                  ;; and an unused seam is a seam nobody keeps correct.
+                  (nil? head-of!) (assoc :read-head! read-head!
+                                         :verify-fn verify-fn
+                                         ;; `admitted?` is a seam like the
+                                         ;; others and REQUIRED like the
+                                         ;; others. A store built without it
+                                         ;; would verify signatures from keys
+                                         ;; nobody admitted -- see
+                                         ;; `inga.head/verify-cert`. A set
+                                         ;; satisfies `ifn?`.
+                                         :admitted? admitted?)
+                  (some? head-of!) (assoc :head-of! head-of!))]
     (when-not (ifn? v)
       (throw (ex-info "inga.ref: missing or non-callable seam"
                       {:type :inga.ref/invalid-seam :seam k}))))
-  (when-not (pos-int? quorum)
+  (when (and (nil? head-of!) (not (pos-int? quorum)))
     (throw (ex-info "inga.ref: quorum must be a positive integer"
                     {:type :inga.ref/invalid-quorum :quorum quorum})))
-  (->QuorumRefStore read-head! write-head! propose! verify-fn admitted? quorum height-fn))
+  (map->QuorumRefStore {:read-head! read-head! :write-head! write-head!
+                        :propose! propose! :verify-fn verify-fn
+                        :admitted? admitted? :quorum quorum
+                        :height-fn height-fn :head-of! head-of!}))
 
 ;; ── the ref as a projection of the committed log ────────────────────────────
 ;;

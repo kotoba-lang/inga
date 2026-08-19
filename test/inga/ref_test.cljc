@@ -150,3 +150,57 @@
           "a certificate proves the witnesses signed THAT record, not that it answers THIS ref")
       (testing "and `other` still reads, so this rejects substitution and not the head"
         (is (= "cid-other" (:cid (storage/-read-ref refs "other"))))))))
+
+;; ── the other way to answer "what is the verified head" ─────────────────────
+
+(deftest head-of-replaces-the-read-and-verify-pair
+  ;; inga's own witnesses sign a vote payload covering a BLOCK HASH, so no
+  ;; quorum certificate satisfies `head/verify-cert` and a deployment on real
+  ;; consensus has to prove its heads another way (`inga.commitment`).
+  ;; `head-of!` is that seam; the certificate form is untouched.
+  (let [heads (atom {})
+        decided (atom {})
+        asked (atom [])
+        refs (iref/ref-store
+              {:write-head! (fn [ref-name h] (swap! heads assoc ref-name h))
+               :propose! (reference-quorum decided)
+               ;; No read-head!, no verify-fn, no admitted?, no quorum: this
+               ;; form does not use them, and demanding them would make a
+               ;; deployment invent seams nothing calls.
+               :head-of! (fn [ref-name]
+                           (swap! asked conj ref-name)
+                           (get @heads ref-name))})]
+    (is (:published? (storage/-compare-and-set-ref! refs "main" nil "cid-1")))
+    (is (= {:cid "cid-1" :version 0} (storage/-read-ref refs "main")))
+    (is (seq @asked) "the seam was actually used, not merely accepted")
+
+    (testing "the compare-and-set still compares — a second writer from the
+              same base loses, and is told the head that won"
+      (let [loser (storage/-compare-and-set-ref! refs "main" nil "cid-other")]
+        (is (false? (:published? loser)))
+        (is (= "cid-1" (:current loser)))))
+
+    (testing "a head-of! that refuses everything reads as an absent ref rather
+              than an error — the same reading `head/verify-head` gives"
+      (let [blind (iref/ref-store
+                   {:write-head! (fn [_ _] nil)
+                    :propose! (reference-quorum (atom {}))
+                    :head-of! (constantly nil)})]
+        (is (nil? (storage/-read-ref blind "main")))))))
+
+(deftest the-certificate-form-still-demands-its-seams
+  (testing "dropping head-of! must not make the original form lenient"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (iref/ref-store {:read-head! (constantly nil)
+                                  :write-head! (fn [_ _] nil)
+                                  :propose! (constantly nil)
+                                  :verify-fn verify-fn
+                                  ;; no admitted?
+                                  :quorum quorum})))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (iref/ref-store {:read-head! (constantly nil)
+                                  :write-head! (fn [_ _] nil)
+                                  :propose! (constantly nil)
+                                  :verify-fn verify-fn
+                                  :admitted? (set witnesses)
+                                  :quorum 0})))))
