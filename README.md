@@ -36,6 +36,7 @@ followed from that cause.
 | `inga.fuel` | **F2** — metered execution where running out is a *state transition*, never an exception |
 | `inga.power` | **F3** — the power table as committed state, and a `:storage` role on the existing bond market |
 | `inga.retrieval` | **F3** — crediting that `:storage` role by asking a witness to produce blocks it claims to hold |
+| `inga.commitment` | **a head record proved by the consensus that actually ran** — this record is in this block, and this block carries a quorum certificate |
 | `inga.parity` | one scenario over the pure namespaces, run on JVM **and** nbb, printing one digest |
 
 Pure `.cljc`. No I/O, no crypto, no wall-clock — signature verification and
@@ -43,6 +44,34 @@ the quorum itself are injected, the same seam `kotobase.storage.signed-head`
 uses for `sign-fn` and `engi.consensus` uses for `hash-fn`. The only
 dependency is the storage contract it implements, which is itself
 zero-dependency.
+
+## Two proofs, and why there had to be a second one
+
+`inga.ref` asks `inga.head/verify-cert` for signatures over
+`head/canonical-bytes` of a head record. This repository's witnesses sign
+`inga.attest/vote-payload` — chain, view, height, **block hash**, witness.
+Those are different byte strings, so **no placement of a quorum certificate
+satisfies that verifier**, and it is why `inga.ref`'s own docstring could say
+"the adapter was correct and connected to nothing": the only thing that ever
+implemented `propose!` was a cooperative oracle in the tests. Superproject
+ADR-2608198200 has the measurement.
+
+`inga.commitment` proves membership instead: the record is among the block's
+proposals, the block hash is the one the certificate names, and the
+certificate verifies. Three checks, each removing a specific attack, and the
+binding is checked before the signatures for the same reason
+`verify-certificate` checks membership before the threshold.
+
+It is a **separate namespace** on purpose. Not in `inga.head`, which would
+leave one namespace owning two proof models with no way to tell from a call
+site which one a deployment relies on. Not in `inga.ref`, which is an adapter
+and would then contain the verification it is meant to be given. The head-record
+certificate is untouched — a deployment whose witnesses sign head records keeps
+working exactly as before.
+
+`inga.ref` takes `head-of!` for this: one seam that reads and verifies, because
+a commitment proof travels **with** the read and splitting them would leave the
+verifier needing something it was never handed.
 
 ## The one idea
 
