@@ -64,8 +64,8 @@
                       ;; compiler on `main` rejects sources these pins accept
                       ;; (`string=?` returns `:bool` there and `:i64` here), so
                       ;; advancing means migrating the cores and regenerating.
-                      io.github.kotoba-lang/compiler
-                      {:git/url "https://github.com/kotoba-lang/compiler.git"
+                      io.github.kotoba-lang/amu
+                      {:git/url "https://github.com/kotoba-lang/amu.git"
                        :git/sha "806f5cef7d5bc11ad8ec8514ad6121efc73be6c7"}}
          :main-opts ["-m" "cognitect.test-runner"]}
   ;; Rebuild `kotoba/*.wasm` and their provenance records from `kotoba/*.kotoba`.
