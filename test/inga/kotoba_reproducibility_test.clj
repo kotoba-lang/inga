@@ -117,9 +117,32 @@
   ;; ADR-2608120200's missing half. A tag, a branch or an abbreviated sha names
   ;; something that can come to mean different bytes later, which is exactly
   ;; what a builder record exists to prevent.
-  (let [sha (get-in (edn/read-string (slurp "deps.edn"))
-                    [:aliases :test :extra-deps 'io.github.kotoba-lang/compiler :git/sha])]
-    (is (string? sha) "deps.edn :test does not pin a compiler at all")
+  ;; The coordinate is `amu`, not `compiler`. `kotoba-lang/compiler` was renamed
+  ;; to `kotoba-lang/amu`（編む）and this repo's deps.edn moved with it — the
+  ;; pinned commit is literally "canonical io.github.kotoba-lang/amu
+  ;; coordinate" — but this lookup was left behind. `get-in` on the old key
+  ;; returns nil, so both assertions below failed and main has been red since.
+  ;; Measured 2026-08-24 by the mutation harness in com-junkawasaki/root, which
+  ;; refuses to run mutations against a suite that is not green at its pin: the
+  ;; test that guards the builder record was itself the thing that broke.
+  ;;
+  ;; ⚠ The 40-character assertion below cannot be exercised on its own: any pin
+  ;; that is not a full sha also fails dependency resolution, so the suite dies
+  ;; before reaching it. Measured 2026-08-24 — shortening the pin to 12
+  ;; characters produced a classpath error, not this failure. It is kept as a
+  ;; statement of the rule, not as a check that has been seen to bite. The
+  ;; failure mode that IS reachable is the one that just happened: the
+  ;; coordinate is renamed, resolution keeps working, and only the lookup goes
+  ;; stale.
+  (let [deps (edn/read-string (slurp "deps.edn"))
+        sha (or (get-in deps [:aliases :test :extra-deps 'io.github.kotoba-lang/amu :git/sha])
+                ;; historical coordinate, kept so an older deps.edn still reads
+                (get-in deps [:aliases :test :extra-deps 'io.github.kotoba-lang/compiler :git/sha]))]
+    (is (string? sha)
+        (str "deps.edn :test pins no compiler under io.github.kotoba-lang/amu"
+             " (nor the historical .../compiler). The compiler repo is `amu`"
+             " — see CLAUDE.md's note that the old name survives only as a"
+             " GitHub redirect."))
     (is (re-matches #"[0-9a-f]{40}" (str sha))
         (str "the compiler pin must be a full 40-character commit sha, got " (pr-str sha)))))
 
