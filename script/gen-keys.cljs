@@ -1,0 +1,29 @@
+;; One-off helper: generate real Ed25519 keypairs for a witness set, printed
+;; as EDN on stdout. Not part of the protocol — the protocol takes keys and
+;; a verify-fn from whoever deploys it (inga.attest, inga.replica). This just
+;; produces a set an operator can hand out: public keys to every replica,
+;; each private key to the one process that is that witness.
+;;
+;;   nbb --classpath src script/gen-keys.cljs w1,w2,w3,w4 > /tmp/inga-keys.edn
+;;
+;; These are throwaway keys for a temporary verification run — not custody of
+;; anything, not committed anywhere, not reused after the run ends.
+(ns gen-keys
+  (:require ["node:crypto" :as nc]))
+
+(defn -main [& args]
+  (let [witnesses (if (seq args)
+                     (clojure.string/split (first args) #",")
+                     ["w1" "w2" "w3" "w4"])
+        pairs (into {}
+                    (for [w witnesses]
+                      [w (let [kp (nc/generateKeyPairSync
+                                   "ed25519"
+                                   #js {:publicKeyEncoding #js {:type "spki" :format "der"}
+                                        :privateKeyEncoding #js {:type "pkcs8" :format "der"}})]
+                           {:pub (.toString (.-publicKey kp) "base64")
+                            :priv (.toString (.-privateKey kp) "base64")})]))]
+    (println (pr-str {:pub (into {} (for [[w m] pairs] [w (:pub m)]))
+                       :priv (into {} (for [[w m] pairs] [w (:priv m)]))}))))
+
+(apply -main *command-line-args*)
