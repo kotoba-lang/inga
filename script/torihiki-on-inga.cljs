@@ -4,7 +4,7 @@
 ;; on the blocks engi commits, and asked afterwards whether they hold the same
 ;; exchange: same state root, same best bid and ask, same positions.
 ;;
-;;   nbb --classpath "src:<torihiki>/src:<bytes>/src" script/torihiki-on-inga.cljs
+;;   nbb --classpath "src:<torihiki>/src:<bytes>/src:.deps/org-nist-sha2/src" script/torihiki-on-inga.cljs
 ;;
 ;; ## Why this is the run that matters
 ;;
@@ -52,7 +52,7 @@
 (ns torihiki-on-inga
   (:require ["ws" :as ws]
             ["node:crypto" :as nc]
-            ["@noble/hashes/sha2.js" :refer [sha256]]
+            [sha2.core :as sha2]
             [inga.attest :as att]
             [inga.consensus :as c]
             [inga.net.server :as srv]
@@ -72,11 +72,11 @@
 
 (defn port-of [w] (+ base-port (.indexOf (to-array witnesses) w)))
 
-(defn- hex [^js bs]
-  (apply str (map #(.padStart (.toString % 16) 2 "0") (array-seq bs))))
+(defn- utf8-bytes [s]
+  (vec (array-seq (.encode (js/TextEncoder.) s))))
 
 (defn hash-fn [b]
-  (hex (sha256 (.encode (js/TextEncoder.) (c/canonical-block b)))))
+  (sha2/sha256-hex (utf8-bytes (c/canonical-block b))))
 
 ;; ── keys ────────────────────────────────────────────────────────────────────
 
@@ -113,9 +113,9 @@
   of millions of accounts rather than tens of thousands — and a collision is
   refused rather than silent, so the loser can see it and use another key."
   [pubkey]
-  (let [d (sha256 (js/Buffer.from pubkey "base64"))]
+  (let [d (sha2/sha256 (vec (seq (js/Buffer.from pubkey "base64"))))]
     (+ 100000
-       (mod (reduce (fn [acc i] (+ (* acc 256) (aget d i))) 0 (range 6))
+       (mod (reduce (fn [acc i] (+ (* acc 256) (nth d i))) 0 (range 6))
             35184372088832))))
 
 (def trader-keys
