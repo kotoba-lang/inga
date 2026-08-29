@@ -24,7 +24,7 @@
 ;;   PRIVKEY_B64=<this witness's base64 pkcs8 private key> \
 ;;   RUN_MS=20000 \
 ;;   OUT_FILE=/tmp/inga-w1-result.edn \
-;;   nbb --classpath src script/network-node.cljs
+;;   nbb --classpath "src:.deps/org-nist-sha2/src" script/network-node.cljs
 ;;
 ;; `PEERS` binds every witness (including self) to a host:port; this process
 ;; listens on the port named for its own witness (host part of its own entry
@@ -35,7 +35,7 @@
   (:require ["ws" :as ws]
             ["node:crypto" :as nc]
             ["node:fs" :as fs]
-            ["@noble/hashes/sha2.js" :refer [sha256]]
+            [sha2.core :as sha2]
             [clojure.edn :as edn]
             [clojure.string :as str]
             [inga.attest :as att]
@@ -94,11 +94,11 @@
          (catch :default _ false))
     false))
 
-(defn- hex [^js bs]
-  (apply str (map #(.padStart (.toString % 16) 2 "0") (array-seq bs))))
+(defn- utf8-bytes [s]
+  (vec (array-seq (.encode (js/TextEncoder.) s))))
 
 (defn hash-fn [b]
-  (hex (sha256 (.encode (js/TextEncoder.) (c/canonical-block b)))))
+  (sha2/sha256-hex (utf8-bytes (c/canonical-block b))))
 
 (def machine
   "Same order-sensitive digest as script/network.cljs — deliberately no
@@ -108,10 +108,10 @@
    :apply-fn (fn [st b]
                {:height (:inga.block/height b)
                 :applied (inc (:applied st))
-                :digest (hex (sha256 (.encode (js/TextEncoder.)
-                                              (str (:digest st) "|"
-                                                   (:inga.block/height b) "|"
-                                                   (c/canonical-block b)))))})
+                :digest (sha2/sha256-hex
+                         (utf8-bytes (str (:digest st) "|"
+                                          (:inga.block/height b) "|"
+                                          (c/canonical-block b))))})
    :root-fn (fn [st] (str (:applied st) ":" (subs (:digest st) 0 16)))})
 
 (defn vote-verifier [v]

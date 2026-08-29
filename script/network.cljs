@@ -5,7 +5,7 @@
 ;; over sockets rather than over a map, because a transport that only exists
 ;; in a test is the part that turns out to be wrong.
 ;;
-;;   nbb --classpath src script/network.cljs
+;;   nbb --classpath "src:.deps/org-nist-sha2/src" script/network.cljs
 ;;
 ;; Votes are signed with real Ed25519 (node:crypto, synchronous, which is why
 ;; the consensus seam did not have to become async) and verified against a
@@ -33,7 +33,7 @@
             ["node:crypto" :as nc]
             [inga.attest :as att]
             [inga.consensus :as c]
-            ["@noble/hashes/sha2.js" :refer [sha256]]
+            [sha2.core :as sha2]
             [inga.net.server :as srv]
             [inga.net.ws :as nws]
             [inga.replica :as r]
@@ -112,19 +112,19 @@
 (def base-port 19301)
 (defn port-of [w] (+ base-port (.indexOf (to-array witnesses) w)))
 
-(defn- hex [^js bs]
-  (apply str (map #(.padStart (.toString % 16) 2 "0") (array-seq bs))))
+(defn- utf8-bytes [s]
+  (vec (array-seq (.encode (js/TextEncoder.) s))))
 
 (defn hash-fn
   "SHA-256 of the canonical block string. The same digest a JVM replica takes,
   over the same bytes — which is the only reason a browser can check a chain a
   server produced.
 
-  Calls `@noble/hashes` directly rather than `engi.crypto`, whose transitive
+  Uses `org-nist-sha2` rather than `engi.crypto`, whose transitive
   `kotobase.cid` dependency is not resolvable from here. Same primitive, same
   bytes; the difference is which module wraps it."
   [b]
-  (hex (sha256 (.encode (js/TextEncoder.) (c/canonical-block b)))))
+  (sha2/sha256-hex (utf8-bytes (c/canonical-block b))))
 
 ;; ── one replica, wrapped in sockets ─────────────────────────────────────────
 
@@ -180,10 +180,10 @@
    :apply-fn (fn [st b]
                {:height (:inga.block/height b)
                 :applied (inc (:applied st))
-                :digest (hex (sha256 (.encode (js/TextEncoder.)
-                                              (str (:digest st) "|"
-                                                   (:inga.block/height b) "|"
-                                                   (c/canonical-block b)))))})
+                :digest (sha2/sha256-hex
+                         (utf8-bytes (str (:digest st) "|"
+                                          (:inga.block/height b) "|"
+                                          (c/canonical-block b))))})
    :root-fn (fn [st] (str (:applied st) ":" (subs (:digest st) 0 16)))})
 
 (defn vote-verifier
