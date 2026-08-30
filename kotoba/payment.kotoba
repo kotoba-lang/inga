@@ -1,0 +1,37 @@
+(ns inga.payment)
+
+;; x402 prepaid reservation decision core.
+;;
+;; This is the independent Kotoba reference for `inga.payment/reserve-verdict`.
+;; It deliberately owns no storage, clock, network, or identity capability.
+;; Kotobase linearizes the operation by publishing the resulting state under a
+;; compare-and-set head; every failed CAS executes this decision again against
+;; the newly observed consumed amount.
+;;
+;; Values are non-negative micro-USDC i64. Hosts validate the narrower
+;; JavaScript-safe range before calling this core. The subtraction form avoids
+;; overflowing `consumed + price` while deciding.
+
+(defn allowed [paid :i64 consumed :i64 price :i64] :i64
+  (if (< paid 0)
+    0
+    (if (< consumed 0)
+      0
+      (if (<= price 0)
+        0
+        (if (> consumed paid)
+          0
+          (if (> price (- paid consumed)) 0 1))))))
+
+(defn next-consumed [paid :i64 consumed :i64 price :i64] :i64
+  (if (= 1 (allowed paid consumed price))
+    (+ consumed price)
+    consumed))
+
+(defn remaining [paid :i64 consumed :i64 price :i64] :i64
+  (if (= 1 (allowed paid consumed price))
+    (- paid (+ consumed price))
+    (- paid consumed)))
+
+(defn main [] :i64
+  (allowed 10000 0 10000))
