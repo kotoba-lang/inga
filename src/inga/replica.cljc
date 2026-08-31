@@ -1384,6 +1384,52 @@
           (vote-on-tip now))
       [state []])))
 
+(def ^:private linking-refusals
+  "Sync refusals that say the disagreement is BELOW where we have been asking.
+
+  Both are the append path reporting that the segment's first block does not
+  sit on our tip. A replica that is merely behind never sees them -- what it
+  gets is blocks that attach. Seeing one means our tip is not on the branch
+  the peer is offering, and no segment above our tip can ever say more."
+  #{:does-not-link :does-not-attach})
+
+(defn- sync-ask-from
+  "The height to ask a peer to start from.
+
+  `(inc (height state))` -- ask for what is above us -- is right for a replica
+  that is BEHIND, and it is the only thing this asked for. It cannot resolve a
+  fork: `sync-step` consults `conflicts-with-chain?` only when the incoming
+  segment starts at or below our tip, so a segment that begins at `tip + 1`
+  goes to the append path, where a fork below the tip is invisible.
+
+  Measured 2026-08-31 on `torihiki-validator-v3`, sixteen days into a stall.
+  w1 held a different block at 5616 from the branch a quorum had certified,
+  and its committed height was 5614:
+
+      /block?height=5615   identical on both branches
+      /block?height=5616   DIFFERENT
+
+  It asked from 5617 once per view for roughly 900,000 views, was answered
+  5617-5634 every time, and refused every one `:does-not-link`. The rewind
+  path that exists for exactly this was never reached.
+
+  So after a linking refusal, ask from `committed + 1` instead. That is the
+  LOWEST USEFUL point rather than a guess: `sync-step` passes the committed
+  height as `:floor` and `rewind-target` refuses to replace a committed block,
+  so nothing below it could be adopted whatever a peer sent.
+
+  It is what a refusal buys and a success spends -- a replica that is helped
+  goes back to asking above its tip, because asking from `committed + 1` every
+  time would re-fetch the uncommitted suffix on every request forever.
+
+  ADR-2608150200 removed a `sync-from` on the grounds that no scenario
+  executed it. The scenario existed; the harness did not."
+  [state]
+  (let [above (inc (height state))]
+    (if (contains? linking-refusals (:reason (:last-sync state)))
+      (min above (inc (committed-height state)))
+      above)))
+
 (defn- vote-verifier
   "A `(fn [vote] boolean)` for `inga.stake/verify-equivocation-evidence`,
   built from the seams this replica already has.
@@ -1527,7 +1573,7 @@
                     [{:to :all
                       :msg {:type :sync-request
                             :witness (:id state')
-                            :from (inc (height state'))
+                            :from (sync-ask-from state')
                             ;; We do not know the target, so ask for a window
                             ;; above us. `handle-sync-request` answers with
                             ;; what it actually holds.

@@ -1528,3 +1528,52 @@
       (is (seq (filter #(= :evidence (:type (:msg %))) out))
           "and still forwarded")
       (is (contains? (set (r/equivocators s2)) "w2")))))
+
+;; ── asking low enough to see a fork below the tip ───────────────────────────
+
+(deftest a-replica-whose-tip-conflicts-asks-below-it
+  ;; Measured 2026-08-31 on `torihiki-validator-v3`, sixteen days into a stall:
+  ;;
+  ;;   w1 h 5616 committed 5614   /block?height=5615 identical
+  ;;   w2 h 5635 committed 5633   /block?height=5616 DIFFERENT
+  ;;
+  ;; The fork is one block above w1's committed height. `sync-step` has the
+  ;; rewind path for exactly this and never saw it, because `on-tick` asked
+  ;;
+  ;;     :from (inc (height state'))
+  ;;
+  ;; and a segment starting above our tip never reaches
+  ;; `conflicts-with-chain?`. w1 asked from 5617 nine hundred thousand times.
+  ;;
+  ;; A replica that has been refused for a linking reason has evidence that
+  ;; the disagreement is BELOW where it has been asking. The lowest useful
+  ;; place to ask is `committed + 1`: a rewind may never replace a committed
+  ;; block, so nothing under that could be adopted anyway.
+  (let [s (get (net) :w1)
+        ;; The state a refused sync leaves behind. `handle-sync-response`
+        ;; records it; nothing read it.
+        s (assoc s :last-sync {:offered 3 :from 10 :to 12
+                               :adopted 0 :reason :does-not-link})
+        ;; The request rides the timeout branch: a view that produced nothing
+        ;; is the only evidence a replica gets that it might be behind.
+        [s1 _] (r/on-tick s 1000)
+        [_ out] (r/on-tick s1 (inc (:deadline (:pm s1))))
+        req (first (filter #(= :sync-request (:type (:msg %))) out))]
+    (is (some? req) "a stalled replica has to ask")
+    (is (<= (:from (:msg req)) (inc (r/committed-height s)))
+        "after a linking refusal the replica asked above its own tip again,
+         which is the one place the answer cannot be")))
+
+(deftest a-replica-that-was-helped-goes-back-to-asking-above-its-tip
+  ;; The floor is not a new default. Asking from `committed + 1` every time
+  ;; would re-fetch the uncommitted suffix on every request forever; it is
+  ;; what a refusal buys, and a success spends.
+  (let [s (get (net) :w1)
+        s (assoc s :last-sync {:offered 3 :from 10 :to 12
+                               :adopted 3 :reason nil})
+        [s1 _] (r/on-tick s 1000)
+        [_ out] (r/on-tick s1 (inc (:deadline (:pm s1))))
+        req (first (filter #(= :sync-request (:type (:msg %))) out))]
+    (is (some? req))
+    (is (= (inc (r/height s)) (:from (:msg req)))
+        "a replica that is merely behind asked for blocks it already has")))

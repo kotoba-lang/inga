@@ -441,7 +441,18 @@
   every certificate it has formed."
   [node]
   (let [old @(:state node)
-        chain (vec (rest (:chain old)))]
+        full (vec (rest (:chain old)))
+        ;; `EVICT_TAIL=n` comes back from a CHECKPOINT rather than from the
+        ;; whole log, which is what a deployed validator actually does:
+        ;; `resume` bounds the chain to `resume-tail` blocks. Replaying
+        ;; everything is the friendlier case and was the only one modelled --
+        ;; a replica that keeps its whole history rejoins the branch it left,
+        ;; so no eviction in this harness could ever produce the fork the
+        ;; deployed chain has been sitting in since 2026-08-15.
+        tail (some-> js/process .-env .-EVICT_TAIL (js/parseInt 10))
+        chain (if (and tail (pos? tail) (> (count full) tail))
+                (vec (take-last tail full))
+                full)]
     (reset! (:state node)
             (r/replay (r/replica {:witness (:witness node)
                                   :commit-rule (if (= "two-chain"
