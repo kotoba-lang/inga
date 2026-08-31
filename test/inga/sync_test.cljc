@@ -294,3 +294,62 @@
     (is (false? (sync/conflicts-with-chain? h chain
                                             [(blk 9 "somewhere" :w1 nil)]))
         "a height we do not hold is not a conflict, it is a gap")))
+
+;; ── the shape the deployed chain actually stalled in ────────────────────────
+;;
+;; Measured 2026-08-31 on `torihiki-validator-v3`, sixteen days after it stopped:
+;;
+;;   w1 h 5616 committed 5614 root 48cad367  booted-from-checkpoint true
+;;   w2 h 5635 committed 5633 root eb4e02a9  booted-from-checkpoint true
+;;   w3 h 5635 committed 5633 root eb4e02a9  view 916136 and climbing
+;;   w4 h 5616 committed 5614 root 48cad367
+;;
+;;   /block?height=5615  identical on both branches
+;;   /block?height=5616  DIFFERENT
+;;
+;; So the fork is one block above w1's committed height and nineteen below
+;; w2's. w2's branch is the one a quorum certified; w1 and w4 restored from a
+;; checkpoint and replayed onto a different 5616.
+;;
+;; `sync-step`'s rewind path is exactly the machinery for that, and it was
+;; never reached, because of one line in `on-tick`:
+;;
+;;     :from (inc (height state'))
+;;
+;; A replica asks for blocks ABOVE ITS OWN TIP and can ask for nothing else.
+;; w1, tip 5616, asks from 5617. w2 answers 5617-5634. Every one of those
+;; blocks is above w1's tip, so `(<= start tip-h)` is false,
+;; `conflicts-with-chain?` is never consulted, and the segment goes to the
+;; append path — where its parent is a 5616 w1 does not have.
+;; `:does-not-link`, forever, at one message per view for 900,000 views.
+;;
+;; ADR-2608150200 removed `sync-from` on the grounds that no scenario executed
+;; it. The scenario existed; the harness did not.
+
+(deftest a-segment-above-our-tip-cannot-resolve-a-fork-below-it
+  (testing "the production shape, at the sync layer: our tip conflicts, and
+            everything the peer can offer starts above it"
+    (let [{:keys [chain rival]} (fork-at 3)
+          ;; We are on the rival branch at height 3; the certified branch
+          ;; continues from the block we do not have.
+          ours (conj (vec (take 3 chain)) rival)
+          rival-child (blk 4 (h (nth chain 3)) :w1 (qc-for (nth chain 3) [:w1 :w2 :w3]))
+          ;; What a peer answers when we ask from tip+1.
+          above [rival-child]
+          r (sync/sync-step h quorum ours above (assoc params :floor 2))]
+      (is (zero? (:adopted r)))
+      (is (= :does-not-link (:reason r))
+          "a segment starting above the tip reaches the append path, which is
+           the one path that cannot see a conflict below it")))
+  (testing "and the SAME peer, asked one block lower, resolves it"
+    (let [{:keys [chain rival]} (fork-at 3)
+          ours (conj (vec (take 3 chain)) rival)
+          rival-child (blk 4 (h (nth chain 3)) :w1 (qc-for (nth chain 3) [:w1 :w2 :w3]))
+          ;; Asking from committed+1 instead of tip+1 puts the fork point
+          ;; inside the segment, which is what makes it a rewind.
+          from-below [(nth chain 3) rival-child]
+          r (sync/sync-step h quorum ours from-below (assoc params :floor 2))]
+      (is (= :rewound (:reason r)))
+      (is (= 2 (:adopted r)))
+      (is (= 1 (:discarded r))
+          "the block we had at the fork height was replaced, and sync said so"))))
