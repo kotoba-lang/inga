@@ -2,7 +2,7 @@
 ;; the certificate itself. Every layer below this has been measured; this is
 ;; the first time they are measured together.
 (ns check-worker-signed
-  (:require [clojure.string]
+  (:require [kotoba.lang.text]
             ["node:crypto" :as nc]
             [inga.consensus :as c]
             [inga.attest :as att]
@@ -42,8 +42,8 @@
        ((:broadcast! node) {:type :new-view :witness a :view 10 :high-qc forged})
        (js/setTimeout
         (fn []
-          (-> (js/fetch (clojure.string/replace
-                         (clojure.string/replace url #"^wss" "https") #"/peer$" "/head"))
+          (-> (js/fetch (kotoba.lang.text/replace
+                         (kotoba.lang.text/replace url #"^wss" "https") #"/peer$" "/head"))
               (.then #(.json %))
               (.then (fn [h]
                        (println "hub /head:" (js/JSON.stringify h))

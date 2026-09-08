@@ -9,11 +9,11 @@
 ;; These are throwaway keys for a temporary verification run — not custody of
 ;; anything, not committed anywhere, not reused after the run ends.
 (ns gen-keys
-  (:require ["node:crypto" :as nc]))
+  (:require [kotoba.lang.text] ["node:crypto" :as nc]))
 
 (defn -main [& args]
   (let [witnesses (if (seq args)
-                     (clojure.string/split (first args) #",")
+                     (kotoba.lang.text/split (first args) #",")
                      ["w1" "w2" "w3" "w4"])
         pairs (into {}
                     (for [w witnesses]

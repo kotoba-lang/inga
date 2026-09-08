@@ -2,7 +2,7 @@
 ;; network, a real TLS terminator and a Durable Object — none of which the
 ;; localhost check exercised.
 (ns check-worker
-  (:require [clojure.string]
+  (:require [kotoba.lang.text]
             [inga.consensus :as c]
             [inga.net.ws :as nws]))
 
@@ -33,11 +33,11 @@
                         )
               (.then (fn [_] nil))
               (.catch (fn [_] nil)))
-          (-> (js/fetch (clojure.string/replace url #"^wss" "https")
+          (-> (js/fetch (kotoba.lang.text/replace url #"^wss" "https")
                         )
               (.then (fn [_] nil)) (.catch (fn [_] nil)))
-          (-> (js/fetch (clojure.string/replace
-                         (clojure.string/replace url #"^wss" "https")
+          (-> (js/fetch (kotoba.lang.text/replace
+                         (kotoba.lang.text/replace url #"^wss" "https")
                          #"/peer$" "/head"))
               (.then #(.json %))
               (.then (fn [h]
