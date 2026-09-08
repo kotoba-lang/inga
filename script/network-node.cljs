@@ -37,7 +37,7 @@
             ["node:fs" :as fs]
             [sha2.core :as sha2]
             [clojure.edn :as edn]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [inga.attest :as att]
             [inga.consensus :as c]
             [inga.net.server :as srv]

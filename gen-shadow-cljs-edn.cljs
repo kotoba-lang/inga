@@ -4,7 +4,7 @@
 ;; Output is out/test.cjs, not .js: this package is "type": "module" (the nbb
 ;; scripts need ESM) and shadow-cljs emits CommonJS, so a .js extension makes
 ;; node treat the bundle as an ES module and die on __dirname.
-(require '[clojure.string :as str])
+(require '[kotoba.lang.text :as str])
 (def fs (js/require "node:fs"))
 (def cp (js/require "node:child_process"))
 (defn sh [& args]
