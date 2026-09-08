@@ -36,7 +36,7 @@
   gives: without the chain id a testnet signature authorises a mainnet vote;
   without the view a signature from one view certifies another; without the
   witness a signature can be replayed as somebody else's."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [inga.quorum :as q]))
 
 (def reasons

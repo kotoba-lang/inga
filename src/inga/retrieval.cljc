@@ -42,7 +42,7 @@
 
   Pure: no I/O, no crypto, no clock. `hash-fn` and `cid-of` are injected, the
   same seam every other namespace here uses."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def ^:private hex-tail 8)
 

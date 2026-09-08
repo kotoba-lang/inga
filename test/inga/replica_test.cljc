@@ -17,7 +17,7 @@
             [inga.wire :as wire]
             [inga.state :as state]
             [inga.state-test :as state-test]
-            [clojure.string]
+            [kotoba.lang.text]
             [inga.stake :as stake]
             [inga.sync :as sync]))
 
@@ -655,7 +655,7 @@
   consensus produces."
   {:init-fn (fn [] [])
    :apply-fn (fn [st b] (conj st (:inga.block/height b)))
-   :root-fn (fn [st] (str (count st) ":" (clojure.string/join "," st)))})
+   :root-fn (fn [st] (str (count st) ":" (kotoba.lang.text/join "," st)))})
 
 (defn- machine-replica [w]
   (r/replica {:witness w :witnesses witnesses :quorum (c/quorum-size 4)

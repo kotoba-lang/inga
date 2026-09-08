@@ -29,7 +29,12 @@
 ;; and `README.md` ("What the Kotoba cores actually run") for the argument.
 ;; `kotoba-kir` therefore does not appear here, and a test asserts it stays out.
 {:paths ["src"]
- :deps {io.github.kotoba-lang/kotobase-storage
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       io.github.kotoba-lang/kotobase-storage
         {:git/url "https://github.com/kotoba-lang/kotobase-storage.git"
          :git/sha "f41e7bd3dfc8547614c6adc843c9d5fd1290687f"}
         ;; F1: the content-addressed state root. arrangement already snapshots a

@@ -31,7 +31,7 @@
   \"kotoba-compiler/1\", a tool name, not a commit."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is]])
   (:import (java.security MessageDigest)))
 
