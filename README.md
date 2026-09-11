@@ -833,3 +833,118 @@ mirrors are diagnostic only, not a supported entrypoint or deployment artifact.
 The shared toolchain must register `.cljk` namespace resolution (including
 platform-collision names recorded in `cljk-origin.edn`) before this nbb suite
 can qualify the canonical source layout.
+
+### Segmented complete-prefix candidate
+
+`inga.segmented-prefix/verify-acquisition` is an additive, pure candidate API.
+Existing `inga.prefix/verify` and `inga.reservation/verify-acquisition` retain
+both their formats and bounds. The new API checks the same first finalized
+seq-zero winner while decoding one segment at a time. It never concatenates a
+second full block vector or builds a projection for every ref. It still reads
+and verifies **all history from genesis on every call: O(history)**. It is not
+a trusted state-root, a succinct proof, a latest-tip oracle, or production
+reservation qualification.
+
+The invocation is `(verify-acquisition record checkpoint segments context)`.
+`segments` is an ordered, materialized vector of `{:cid raw-cid :data edn-text}`.
+Each CID must be the canonical base32 raw CIDv1/sha2-256 address of the exact
+UTF-8 text. The trusted context adds two pure functions to the existing trust
+and proposal-decoding seams: `:segment-cid-fn` computes that real CID, and
+`:text-byte-count` computes UTF-8 byte length. A fake hash/decoder/signature
+callback defeats the guarantee. The host must preserve exact text and use
+fatal UTF-8 decoding when starting with bytes.
+
+The checkpoint has exactly these keys:
+
+```clojure
+{:version "inga.segmented-prefix/v1-candidate"
+ :chain-id chain :genesis-hash genesis-hash
+ :last-cid final-segment-cid :segment-count count :block-count total-blocks}
+```
+
+Each CID-addressed envelope has exactly these keys:
+
+```clojure
+{:version "inga.segmented-prefix/v1-candidate"
+ :chain-id chain :genesis-hash genesis-hash
+ :index zero-based-index :prev-cid previous-segment-cid-or-nil
+ :from-height first-height :to-height last-height
+ :blocks [first-block ... last-block] :tip-qc signed-certificate-for-last-block}
+```
+
+Segment zero starts at the exact trusted empty genesis and has nil `prev-cid`.
+Later segments start at the preceding height plus one, without overlaps. Every
+CID and predecessor link is checked; each segment's chain, genesis, index and
+height metadata must match its contents and the checkpoint. `inga.sync` checks
+parent links, contiguous heights, leader/round rules and parent QCs across
+segment boundaries as well as within them. Each segment tip needs its own
+valid QC. A genesis-only first segment uses the existing trusted-genesis
+bootstrap exception: its QC must name that exact genesis and height zero,
+but need not have quorum signatures. It cannot finalize a reservation. The rolling two-block tail preserves the existing three-chain commit
+rule. No winner or partial success escapes until the final segment, CID and
+count checks complete. All finalized same-ref records are checked even after a
+winner is found. Missing, duplicate, reordered, mismatched-branch and suffix-only
+histories fail closed. The wire profile permits plain/namespaced EDN maps,
+vectors, sets and scalars, without tags, discard forms or character literals;
+a depth scan bounds recursive parsing before the EDN reader.
+
+Finite ceilings are constants; optional `:limits` may only lower them:
+
+| Resource | Ceiling |
+|---|---:|
+| Materialized input UTF-8 text | 32 MiB |
+| Segments / blocks per segment / total blocks | 64 / 128 / 8,192 |
+| One segment's UTF-8 text | 1 MiB |
+| Proposal bytes / proposals per block / total proposals | 8 KiB / 64 / 32,768 |
+| Witnesses / conservative QC signer-check budget | 32 / 65,536 |
+| EDN nesting depth | 64 |
+| Successful result's serialized UTF-8 size | 16 KiB |
+
+Refusals are constant-sized status/reason maps. At most one segment is decoded
+at a time, with two pending blocks and one winning record retained; the pending
+vector is copied so a subvector cannot accidentally retain the full history.
+A block may itself approach the segment-size bound. Parsed object, UTF-16 and
+allocator overhead mean these are not byte-exact heap/RSS limits. Caller input
+allocation happens before this API; the future download adapter must impose
+bounds before buffering. Total byte scanning, canonical hashing and proposal
+work are linear under the ceilings; block-hash calls are conservatively bounded
+by `4 * max-total-blocks + 4 * max-segments + 4`, and segment-CID calls by
+`max-segments`. These are logical-work bounds, not wall-clock CPU guarantees
+for arbitrary injected functions. Overflow is a refusal, not permission to
+skip segments or increase an untrusted budget.
+
+The synthetic suite compares first-wins, loser, unresolved-tail and malformed
+same-ref outcomes with the existing verifier over multiple segment widths,
+including boundaries of one block. It uses real Ed25519 signatures and raw
+CIDs, re-addressed semantic tampering, branch splices, missing/reordered/suffix
+inputs and resource limits. `script/test-reservation.cljk` now also needs the
+archive test codec's dependencies (`inga-node/src`, `kotobase-client/src`,
+`sha2/src`, `text/src`, `kotobase-storage/src`) alongside `src` and `test`.
+The candidate itself adds no runtime dependencies.
+
+#### Producer/archive integration still required
+
+The current inga-node v1 archive publishes one full-prefix bundle. Neither its
+producer nor Draft PR #4's bounded startup lifecycle emits this segment format.
+A future version must retain genuine history before the eight-block snapshot
+window loses it; produce sequential CID-linked envelopes and actual tip QCs;
+verify every object after PUT/readback; then atomically persist the complete
+checkpoint locator. Only segments wholly at or below the verified finalized height may be
+sealed: a segment-tip QC alone does not finalize its last two blocks. A changed
+segment containing an unfinalized tail has a new CID, and any descendant links
+must follow that new CID. Never rewrite finalized content or invent a
+missing segment after restart. Recovery must walk the entire predecessor chain
+within download/count/byte budgets and verify genesis, all boundaries, QCs and
+counts before returning a reservation result. No storage-side assertion or
+state-root may bypass that walk. This requires separately authorized fresh
+Kotobase signing, download cancellation/backpressure and restart/gap tests;
+none is enabled by this pure candidate.
+
+The same external assumptions remain: the configured static validator set and
+ordering are authentic, quorum fault limits and voting/locking rules hold,
+votes are durably recorded before send, witness keys are not cloned or rolled
+back, hashes are collision resistant, and proposal decoding is deterministic.
+A quorum that equivocates can certify two complete alternate branches; segment
+CIDs detect substitution within a chosen chain but cannot make that quorum
+honest. Validator rotation, holder/intent authentication, receiver fencing and
+exactly-once external consumption remain outside this proof.
