@@ -18,11 +18,9 @@
   no key clones or rollback, and collision-resistant canonical block hashes.
   Signatures cannot prove those operational assumptions. A quorum that
   equivocates can certify conflicting histories; this API does not hide it."
-  (:require [inga.attest :as att]
-            [inga.consensus :as c]
-            [inga.head :as head]
+  (:require [inga.head :as head]
             [inga.ref :as ref]
-            [inga.sync :as sync]))
+            [inga.prefix :as prefix]))
 
 (defn- valid-record? [r]
   (and (map? r) (= head/head-version (get r "v"))
@@ -31,18 +29,6 @@
        (string? (get r "cid")) (seq (get r "cid"))
        (if (zero? (get r "seq")) (nil? (get r "prev"))
            (string? (get r "prev")))))
-
-(defn- context-valid?
-  [{:keys [genesis chain-id hash-fn verify-fn decode-proposal witnesses quorum max-blocks]}]
-  (and (map? genesis) (= 0 (:inga.block/height genesis))
-       (empty? (:inga.block/proposals genesis))
-       (string? chain-id) (seq chain-id)
-       (ifn? hash-fn) (ifn? verify-fn) (ifn? decode-proposal)
-       (vector? witnesses) (seq witnesses)
-       (every? #(and (string? %) (seq %)) witnesses)
-       (= (count witnesses) (count (set witnesses)))
-       (pos-int? quorum) (<= (c/quorum-size (count witnesses)) quorum (count witnesses))
-       (pos-int? max-blocks)))
 
 (defn verify-acquisition
   "Return {:status :reserved :record ... :block-hash ...} or {:status
@@ -63,30 +49,17 @@
                                    :as context}]
   (try
     (cond
-      (not (context-valid? context)) {:status :rejected :reason :invalid-context}
+      (not (ifn? decode-proposal)) {:status :rejected :reason :invalid-context}
       (not (and (valid-record? record) (zero? (get record "seq"))))
       {:status :rejected :reason :not-one-shot}
-      (not (and (vector? blocks) (<= 4 (count blocks) max-blocks)))
-      {:status :unresolved :reason :incomplete-prefix}
-      (not= genesis (first blocks)) {:status :rejected :reason :wrong-genesis}
       :else
-      (let [admitted? (set witnesses)
-            reason (sync/validate-segment
-                    hash-fn quorum genesis (subvec blocks 1)
-                    {:max-batch max-blocks :witnesses witnesses}
-                    chain-id verify-fn admitted?)
-            tip (peek blocks)]
-        (cond
-          reason {:status :rejected :reason reason}
-          (or (not= (hash-fn tip) (:inga.qc/block-hash tip-qc))
-              (not= (:inga.block/height tip) (:inga.qc/height tip-qc))
-              (att/verify-certificate tip-qc chain-id quorum verify-fn admitted?))
-          {:status :rejected :reason :invalid-tip-certificate}
-          :else
-          (let [finalized (c/three-chain-commits hash-fn blocks)
+      (let [verified (prefix/verify {:blocks blocks :tip-qc tip-qc} context)]
+        (if-not (= :finalized (:status verified))
+          verified
+          (let [finalized (:blocks verified)
                 records (mapcat #(keep decode-proposal (:inga.block/proposals %)) finalized)
-                ;; Ref projection owns FIRST WINS. Do not filter malformed
-                ;; same-ref records away and thereby promote a later writer.
+                ;; Malformed same-ref records cannot be filtered out to
+                ;; promote a later writer.
                 relevant (filter #(= (get record "ref") (get % "ref")) records)]
             (if-not (every? valid-record? relevant)
               {:status :rejected :reason :malformed-ref-history}

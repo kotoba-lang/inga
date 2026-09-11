@@ -819,3 +819,10 @@ transport. Supply `src`, `test`, inga-node's `src` (test crypto seams), text's
 CLJC consensus component; it is not a Kotoba guest migration or production
 qualification. Holder authentication, receiver fencing, OS power-loss tests
 and live multi-host partitions remain separate work.
+
+`inga.prefix/verify` exposes the same complete-prefix verification independently
+of reservation records, so archive ingestion/readback and reservation consumers
+cannot drift on finality. A bound overflow returns `:max-blocks-exceeded`;
+malformed or membership-only input returns a rejection. `verify-acquisition`
+uses this shared path. This remains a complete-history proof, not a state-root
+checkpoint or a proof of the latest available chain tip.

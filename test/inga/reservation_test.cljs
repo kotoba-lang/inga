@@ -56,7 +56,7 @@
   (is (= :unresolved (status a (proof [[] [] [a]]))))
   (let [p (proof [[a] [] []]) minority (certify (peek (:blocks p)) ["w1" "w2"])]
     (is (= :rejected (status a (assoc p :tip-qc minority)))))
-  (is (= :unresolved (status a {:block {} :qc {}}))))
+  (is (= :rejected (status a {:block {} :qc {}}))))
 
 (deftest duplicate-restart-and-expiry-do-not-reallocate
   (let [p (proof [[a a] [b] [] [] []])
