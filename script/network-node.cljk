@@ -1,6 +1,6 @@
 ;; ONE replica, ONE process, real WebSockets to real hosts — not localhost.
 ;;
-;; script/network.cljs proved consensus over real sockets, but all four
+;; script/network.cljk proved consensus over real sockets, but all four
 ;; replicas live in one process on 127.0.0.1: that is a real transport with a
 ;; fake deployment topology, and "the sockets underneath are real and
 ;; sub-millisecond" is a namespace docstring's own admission that latency was
@@ -10,7 +10,7 @@
 ;; verification is over an actual network of separate machines, not shared
 ;; memory.
 ;;
-;; No byzantine validator, no forger — those are script/network.cljs's job,
+;; No byzantine validator, no forger — those are script/network.cljk's job,
 ;; already proven over sockets. This script exists to answer a narrower
 ;; question: do N independently-started processes, on N different hosts,
 ;; dialing each other over the tailnet, reach the SAME committed state root.
@@ -24,7 +24,7 @@
 ;;   PRIVKEY_B64=<this witness's base64 pkcs8 private key> \
 ;;   RUN_MS=20000 \
 ;;   OUT_FILE=/tmp/inga-w1-result.edn \
-;;   nbb --classpath "src:.deps/org-nist-sha2/src" script/network-node.cljs
+;;   nbb --classpath "src:.deps/org-nist-sha2/src" script/network-node.cljk
 ;;
 ;; `PEERS` binds every witness (including self) to a host:port; this process
 ;; listens on the port named for its own witness (host part of its own entry
@@ -101,7 +101,7 @@
   (sha2/sha256-hex (utf8-bytes (c/canonical-block b))))
 
 (def machine
-  "Same order-sensitive digest as script/network.cljs — deliberately no
+  "Same order-sensitive digest as script/network.cljk — deliberately no
   application semantics, so this proves ordering agreement and nothing about
   torihiki or engi."
   {:init-fn (fn [] {:height -1 :applied 0 :digest "genesis"})
@@ -136,7 +136,7 @@
 (defn now [] (.getTime (js/Date.)))
 
 (defn sign-out [outbox]
-  ;; Same seam as script/network.cljs's `sign-out`: the replica emits an
+  ;; Same seam as script/network.cljk's `sign-out`: the replica emits an
   ;; unsigned vote, the transport signs it, the signed copy is folded back.
   (let [signed (mapv (fn [{:keys [msg] :as m}]
                        (if (= :vote (:type msg))

@@ -5,7 +5,7 @@
 ;; over sockets rather than over a map, because a transport that only exists
 ;; in a test is the part that turns out to be wrong.
 ;;
-;;   nbb --classpath "src:.deps/org-nist-sha2/src" script/network.cljs
+;;   nbb --classpath "src:.deps/org-nist-sha2/src" script/network.cljk
 ;;
 ;; Votes are signed with real Ed25519 (node:crypto, synchronous, which is why
 ;; the consensus seam did not have to become async) and verified against a
