@@ -937,7 +937,7 @@
 
   ## Measured, and the saving does not pay for that cost
 
-  `script/network.cljs`, NET_DELAY=20, real sockets:
+  `script/network.cljk`, NET_DELAY=20, real sockets:
 
       n=4   broadcast  126 heights   4425 msgs in
             leader     127           4405

@@ -4,11 +4,11 @@
 ;; on the blocks engi commits, and asked afterwards whether they hold the same
 ;; exchange: same state root, same best bid and ask, same positions.
 ;;
-;;   nbb --classpath "src:<torihiki>/src:<bytes>/src:.deps/org-nist-sha2/src" script/torihiki-on-inga.cljs
+;;   nbb --classpath "src:<torihiki>/src:<bytes>/src:.deps/org-nist-sha2/src" script/torihiki-on-inga.cljk
 ;;
 ;; ## Why this is the run that matters
 ;;
-;; script/network.cljs proved consensus works, with a machine written for the
+;; script/network.cljk proved consensus works, with a machine written for the
 ;; occasion — order-sensitive on purpose, but nobody's exchange. torihiki-node
 ;; proved the exchange works, on a single Durable Object sequencer that says
 ;; "consensus: none" in its own /head response. Each half was demonstrated
@@ -432,7 +432,7 @@
              1200))
           ;; `RUN_MS=90000 nbb ...`. The deployment stops at exactly height 225
           ;; with the torihiki machine under it, at two different tick rates,
-          ;; and script/network.cljs passes 380 blocks with a trivial machine.
+          ;; and script/network.cljk passes 380 blocks with a trivial machine.
           ;; The machine is the difference nobody has run long enough to test.
           (js/parseInt (or (some-> js/process .-env .-RUN_MS) "6000") 10))))
      900)))

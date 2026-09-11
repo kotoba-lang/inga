@@ -518,7 +518,7 @@ genuinely cannot do — making the bonds map a function of the committed prefix.
 ### Acceptance
 
 ```bash
-nbb --classpath "src:<torihiki>/src:<bytes>/src" script/torihiki-on-inga.cljs
+nbb --classpath "src:<torihiki>/src:<bytes>/src" script/torihiki-on-inga.cljk
 ```
 
 Four replicas over real WebSockets, each executing `torihiki.state/apply-block`
@@ -567,7 +567,7 @@ refusing is equivocation. A resumed replica cannot legitimately need to vote at
 or below the tip it resumed on: it voted for the block it adopted at each of
 those heights, and every proposal it sees from now on is above them.
 
-`test/inga/resume_test.cljc` was written before the implementation and asserts
+`test/inga/resume_test.cljk` was written before the implementation and asserts
 the property directly — every block the replica holds is offered back to it and
 every vote that leaves is checked against the block it actually adopted.
 
@@ -607,7 +607,7 @@ otherwise evidence is a way to accuse anyone of anything), records once per
 `[witness height]`, and forwards **only on first sight**, so one proof does not
 become a permanent storm between peers.
 
-`script/network.cljs` grew a `BYZANTINE_SPLIT=1` mode that sends the
+`script/network.cljk` grew a `BYZANTINE_SPLIT=1` mode that sends the
 equivocator's second vote to **one** peer instead of all — the case the
 original harness never created, because broadcasting both votes to everyone
 makes every replica an independent detector and never asks whether a proof can
@@ -623,7 +623,7 @@ entirely.
 
 ### The catch assertion is conditional, and says so
 
-`script/network.cljs` used to report `NETWORK: FAIL — an honest replica holds
+`script/network.cljk` used to report `NETWORK: FAIL — an honest replica holds
 no proof against the equivocator` on about one run in four. I first wrote that
 up as a timeout being too short. **That diagnosis was wrong.** Counting what
 the byzantine validator actually cast:

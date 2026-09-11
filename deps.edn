@@ -1,6 +1,6 @@
 ;; inga — 因果. The consensus plane of the kotoba stack (ADR-2608038000).
 ;;
-;; `src/inga/head.cljc` and `src/inga/ref.cljc` are pure `.cljc`: no I/O, no
+;; `src/inga/head.cljk` and `src/inga/ref.cljk` are pure `.cljc`: no I/O, no
 ;; crypto, no wall-clock. Signature verification and the quorum itself are
 ;; INJECTED, the same seam `kotobase.storage.signed-head` uses for `sign-fn`
 ;; and `engi.consensus` uses for `hash-fn`. That is what keeps the curve at
@@ -25,7 +25,7 @@
 ;;
 ;; The thing this rule excludes is named because it was measured and declined,
 ;; not because nobody thought of it: an INTERPRETER for the decision cores in
-;; `kotoba/`. See `test/inga/kotoba_reproducibility_test.clj` for the numbers
+;; `kotoba/`. See `test/inga/kotoba_reproducibility_test.cljk` for the numbers
 ;; and `README.md` ("What the Kotoba cores actually run") for the argument.
 ;; `kotoba-kir` therefore does not appear here, and a test asserts it stays out.
 {:paths ["src"]
