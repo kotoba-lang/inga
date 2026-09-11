@@ -4,7 +4,7 @@
   `engi.core`, signature verification is injected by the caller rather than
   performed here (the same seam `engi.core/fold-balance` already uses for
   its optional `:hash-fn` — this ns takes already-verified votes and a
-  caller-supplied `hash-fn`). Runs identically under JVM `clojure -M:test`
+  caller-supplied `hash-fn`). Runs identically under JVM `kbb -M:test`
   and cljs, and a whole n-witness validator set can be simulated as plain
   data with no real network, transport, or keys.
 

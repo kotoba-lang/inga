@@ -97,7 +97,7 @@
         (is (java.util.Arrays/equals ^bytes fresh ^bytes (shipped-bytes base))
             (str "kotoba/" base ".wasm is not what kotoba/" base ".kotoba compiles"
                  " to under the pinned compiler. Either the source changed without"
-                 " regeneration (run `clojure -M:test:gen`), or the compiler pin in"
+                 " regeneration (run `kbb -M:test:gen`), or the compiler pin in"
                  " deps.edn moved and the binaries were not rebuilt with it."))))))
 
 (deftest the-compiler-emits-the-provenance-record-that-ships
@@ -111,7 +111,7 @@
         (is (= on-disk (:provenance (compile-core base)))
             (str "kotoba/" base ".wasm.provenance.edn is not what the compiler"
                  " emits for this source — it was edited by hand or built by a"
-                 " different compiler. Run `clojure -M:test:gen`."))))))
+                 " different compiler. Run `kbb -M:test:gen`."))))))
 
 (deftest the-builder-commit-is-recorded-precisely
   ;; ADR-2608120200's missing half. A tag, a branch or an abbreviated sha names

@@ -2,8 +2,8 @@
   "One scenario over the pure namespaces, run on both runtimes, printing one
   digest.
 
-      clojure -M:parity
-      nbb --classpath src -e \"(require '[inga.parity :as p]) (p/report)\"
+      kbb -M:parity
+      kbb --backend sci --classpath src -e \"(require '[inga.parity :as p]) (p/report)\"
 
   Both must print the same line.
 

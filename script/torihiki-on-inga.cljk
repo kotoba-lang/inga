@@ -4,7 +4,7 @@
 ;; on the blocks engi commits, and asked afterwards whether they hold the same
 ;; exchange: same state root, same best bid and ask, same positions.
 ;;
-;;   nbb --classpath "src:<torihiki>/src:<bytes>/src:.deps/org-nist-sha2/src" script/torihiki-on-inga.cljk
+;;   kbb --backend sci --classpath "src:<torihiki>/src:<bytes>/src:.deps/org-nist-sha2/src" script/torihiki-on-inga.cljk
 ;;
 ;; ## Why this is the run that matters
 ;;

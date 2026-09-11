@@ -1,7 +1,7 @@
 (ns inga.kotoba-wasm-gen
   "Rebuild `kotoba/*.wasm` and their provenance records from `kotoba/*.kotoba`.
 
-      clojure -M:test:gen
+      kbb -M:test:gen
 
   Runs under :test because that is where the compiler lives and where it must
   stay — nothing under `src/` may load it.

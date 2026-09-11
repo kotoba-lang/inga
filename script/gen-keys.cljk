@@ -4,7 +4,7 @@
 ;; produces a set an operator can hand out: public keys to every replica,
 ;; each private key to the one process that is that witness.
 ;;
-;;   nbb --classpath src script/gen-keys.cljk w1,w2,w3,w4 > /tmp/inga-keys.edn
+;;   kbb --backend sci --classpath src script/gen-keys.cljk w1,w2,w3,w4 > /tmp/inga-keys.edn
 ;;
 ;; These are throwaway keys for a temporary verification run — not custody of
 ;; anything, not committed anywhere, not reused after the run ends.
