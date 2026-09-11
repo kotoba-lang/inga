@@ -812,7 +812,7 @@ An equivocating quorum can sign two incompatible histories; the qualification
 test explicitly demonstrates that limit instead of interpreting signatures as
 proof of operational honesty. Dynamic validator changes are not qualified.
 
-`script/test-reservation.cljs` runs the qualification tests on nbb with real
+`script/test-reservation.cljk` runs the qualification tests on nbb with real
 Ed25519 keys, real replica transitions and an in-memory partitionable
 transport. Supply `src`, `test`, inga-node's `src` (test crypto seams), text's
 `src`, and kotobase-storage's `src` on the classpath. This extends the existing
@@ -826,3 +826,10 @@ cannot drift on finality. A bound overflow returns `:max-blocks-exceeded`;
 malformed or membership-only input returns a rejection. `verify-acquisition`
 uses this shared path. This remains a complete-history proof, not a state-root
 checkpoint or a proof of the latest available chain tip.
+
+After the upstream `.cljk` rename, nbb 1.4.208 does not resolve transitive
+`.cljk` namespaces. The canonical source is kept as `.cljk`; historical-suffix
+mirrors are diagnostic only, not a supported entrypoint or deployment artifact.
+The shared toolchain must register `.cljk` namespace resolution (including
+platform-collision names recorded in `cljk-origin.edn`) before this nbb suite
+can qualify the canonical source layout.
