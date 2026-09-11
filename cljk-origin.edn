@@ -71,4 +71,6 @@
   "src/inga/prefix.cljk" ".cljc"
   "test/inga/reservation_test.cljk" ".cljs"
   "script/test-reservation.cljk" ".cljs"
+  "src/inga/segmented_prefix.cljk" ".cljc"
+  "test/inga/segmented_prefix_test.cljk" ".cljs"
  }}
