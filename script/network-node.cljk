@@ -24,7 +24,7 @@
 ;;   PRIVKEY_B64=<this witness's base64 pkcs8 private key> \
 ;;   RUN_MS=20000 \
 ;;   OUT_FILE=/tmp/inga-w1-result.edn \
-;;   nbb --classpath "src:.deps/org-nist-sha2/src" script/network-node.cljk
+;;   kbb --backend sci --classpath "src:.deps/org-nist-sha2/src" script/network-node.cljk
 ;;
 ;; `PEERS` binds every witness (including self) to a host:port; this process
 ;; listens on the port named for its own witness (host part of its own entry

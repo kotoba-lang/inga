@@ -1,7 +1,7 @@
 (ns inga.consensus-test
   "Pure-logic unit tests for `inga.consensus` — no crypto, no I/O, no network;
   a whole n-witness validator set is simulated as plain data. Runs
-  identically under `clojure -M:test` (JVM) and shadow-cljs :node-test."
+  identically under `kbb -M:test` (JVM) and shadow-cljs :node-test."
   (:require [inga.consensus :as consensus]
             #?(:clj [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer-macros [deftest is testing]])))

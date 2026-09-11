@@ -76,7 +76,7 @@
   ;; Rebuild `kotoba/*.wasm` and their provenance records from `kotoba/*.kotoba`.
   ;; Combine with :test, which is where the compiler lives:
   ;;
-  ;;   clojure -M:test:gen
+  ;;   kbb -M:test:gen
   :gen {:main-opts ["-m" "inga.kotoba-wasm-gen"]}
   ;; One scenario, both runtimes, one digest. See inga.parity's docstring:
   ;; a JVM suite is not evidence about ClojureScript, and ClojureScript is

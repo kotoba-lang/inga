@@ -120,10 +120,10 @@ This is what makes **ADR-2608039000** (`blockchain / 分散型経路に D1 を�
 ## Verification
 
 ```bash
-clojure -M:test      # 309 tests, 1,419 assertions
-clojure -M:lint      # 0 errors, 9 warnings (all pre-existing, in test/)
-clojure -M:parity    # and the same on nbb -- both must print one line
-nbb --classpath "src:$(clojure -Spath | tr ':' '\n' | grep kotobase-storage)" \
+kbb -M:test      # 309 tests, 1,419 assertions
+kbb -M:lint      # 0 errors, 9 warnings (all pre-existing, in test/)
+kbb -M:parity    # and the same on nbb -- both must print one line
+kbb --backend sci --classpath "src:$(kbb -Spath | tr ':' '\n' | grep kotobase-storage)" \
     -e "(require '[inga.parity :as p]) (p/report)"
 ```
 
@@ -318,7 +318,7 @@ real migration and not a bump — measured on `kura`, the compiler on `main`
 rejects sources these pins accept.
 
 ```bash
-clojure -M:test:gen    # rebuild kotoba/*.wasm and their provenance records
+kbb -M:test:gen    # rebuild kotoba/*.wasm and their provenance records
 ```
 
 ## The Filecoin half — F1 / F2 / F3
@@ -518,7 +518,7 @@ genuinely cannot do — making the bonds map a function of the committed prefix.
 ### Acceptance
 
 ```bash
-nbb --classpath "src:<torihiki>/src:<bytes>/src" script/torihiki-on-inga.cljk
+kbb --backend sci --classpath "src:<torihiki>/src:<bytes>/src" script/torihiki-on-inga.cljk
 ```
 
 Four replicas over real WebSockets, each executing `torihiki.state/apply-block`
