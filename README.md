@@ -770,3 +770,66 @@ they must share `:hash-fn`.
 ## License
 
 See the workspace license policy.
+
+### One-shot reservation evidence (qualification API)
+
+`inga.reservation/verify-acquisition` verifies the first finalized seq-zero
+head for a permanent slot. It composes the existing signed segment validator,
+three-chain commit rule, and `inga.ref/project`; it does not alter
+`inga.commitment/verify-head` (membership).
+
+```clojure
+(reservation/verify-acquisition
+  record
+  {:blocks [genesis block-1 block-2 block-3] :tip-qc tip-certificate}
+  {:genesis genesis :chain-id "my-chain"
+   :witnesses ["w1" "w2" "w3" "w4"] :quorum 3 :max-blocks 256
+   :hash-fn hash-block :verify-fn verify-signature :decode-proposal decode})
+;; => {:status :reserved :record winner :block-hash hash}
+;; or {:status :unresolved/:rejected :reason keyword}
+```
+
+Genesis must be trusted and empty. The proof contains **every block** from
+that genesis; the tip is certified and the selected head must be in the
+three-chain finalized prefix. Truncated history, absent progress and a lone
+membership certificate cannot grant a reservation. The proof is deliberately
+O(history), capped by caller policy; hitting that cap is a refusal, not a
+reason to omit history. A committed-state checkpoint/proof is future work.
+
+This verifies an acquisition, **not a send capability**. The CID must bind a
+consumer's authenticated holder, request identity and exact intent. There is
+no expiration, release, or reassignment: seq greater than zero cannot acquire
+this slot. The recipient/signer still needs durable consumption, deduplication
+and fencing before doing external IO; two workers presenting the same winning
+CID both have the same evidence. Do not deploy this as a payment journal or
+restore a legacy HeadStore. The node's existing `{block, qc}` sidecar does not
+serve the full proof this API needs.
+
+The guarantee is conditional on a static correctly configured validator set,
+its quorum fault bound, correct locking/voting, durable state before votes
+leave, no key clones/rollback, and a canonical collision-resistant block hash.
+An equivocating quorum can sign two incompatible histories; the qualification
+test explicitly demonstrates that limit instead of interpreting signatures as
+proof of operational honesty. Dynamic validator changes are not qualified.
+
+`script/test-reservation.cljk` runs the qualification tests on nbb with real
+Ed25519 keys, real replica transitions and an in-memory partitionable
+transport. Supply `src`, `test`, inga-node's `src` (test crypto seams), text's
+`src`, and kotobase-storage's `src` on the classpath. This extends the existing
+CLJC consensus component; it is not a Kotoba guest migration or production
+qualification. Holder authentication, receiver fencing, OS power-loss tests
+and live multi-host partitions remain separate work.
+
+`inga.prefix/verify` exposes the same complete-prefix verification independently
+of reservation records, so archive ingestion/readback and reservation consumers
+cannot drift on finality. A bound overflow returns `:max-blocks-exceeded`;
+malformed or membership-only input returns a rejection. `verify-acquisition`
+uses this shared path. This remains a complete-history proof, not a state-root
+checkpoint or a proof of the latest available chain tip.
+
+After the upstream `.cljk` rename, nbb 1.4.208 does not resolve transitive
+`.cljk` namespaces. The canonical source is kept as `.cljk`; historical-suffix
+mirrors are diagnostic only, not a supported entrypoint or deployment artifact.
+The shared toolchain must register `.cljk` namespace resolution (including
+platform-collision names recorded in `cljk-origin.edn`) before this nbb suite
+can qualify the canonical source layout.

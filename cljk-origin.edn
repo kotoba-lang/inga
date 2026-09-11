@@ -66,4 +66,9 @@
   "test/inga/stake_test.cljk" ".cljc"
   "test/inga/state_test.cljk" ".cljc"
   "test/inga/sync_test.cljk" ".cljc"
-  "test/inga/wire_test.cljk" ".cljc"}}
+  "test/inga/wire_test.cljk" ".cljc"
+  "src/inga/reservation.cljk" ".cljc"
+  "src/inga/prefix.cljk" ".cljc"
+  "test/inga/reservation_test.cljk" ".cljs"
+  "script/test-reservation.cljk" ".cljs"
+ }}
