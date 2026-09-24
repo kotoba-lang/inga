@@ -1,6 +1,6 @@
 (ns inga.propose-test
   "The loop around `inga.ref/outcome`, and the one distinction it cannot make."
-  (:require [clojure.test :refer [deftest is testing #?@(:cljs [async])]]
+  (:require [kotoba.test :refer [deftest is testing #?@(:cljs [async])]]
             [inga.head :as head]
             [inga.ref :as ref]
             [inga.propose :as propose]))

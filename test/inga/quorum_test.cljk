@@ -1,7 +1,7 @@
 (ns inga.quorum-test
   "Two notions of quorum in one system is not a redundancy — it is a question
   about which one is in force, and the answer was the weaker one."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.consensus :as c]
             [inga.quorum :as q]
             [inga.pacemaker :as pm]

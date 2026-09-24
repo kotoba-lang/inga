@@ -16,7 +16,7 @@
   drives, all four records reach the same network, and the winner is whichever
   one the committed order puts first at that sequence. Remove the lock and you
   corrupt an atom; remove the consensus and there is no answer at all."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [inga.consensus :as c]
             [inga.ref :as iref]
             [inga.replica :as r]

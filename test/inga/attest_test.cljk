@@ -1,6 +1,6 @@
 (ns inga.attest-test
   "A quorum of names is not a quorum."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.consensus :as c]
             [inga.attest :as att]
             [inga.sync :as sync]

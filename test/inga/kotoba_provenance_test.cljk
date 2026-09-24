@@ -32,7 +32,7 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is]])
+            [kotoba.test :refer [deftest is]])
   (:import (java.security MessageDigest)))
 
 (def ^:private kotoba-dir (io/file "kotoba"))

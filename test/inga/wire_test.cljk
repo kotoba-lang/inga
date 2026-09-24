@@ -1,7 +1,7 @@
 (ns inga.wire-test
   "A codec that throws on malformed input hands every peer a way to kill the
   replica by sending nonsense."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.consensus :as c]
             [inga.wire :as w]))
 

@@ -21,8 +21,8 @@
   a consensus decision — no adopt or commit path reads it — so a Promise there
   is a caller's `await`, not a protocol break. That is why this split is
   liveable rather than a defect."
-  (:require [clojure.test :refer [deftest is testing]]
-            #?(:cljs [clojure.test :refer [async]])
+  (:require [kotoba.test :refer [deftest is testing]]
+            #?(:cljs [kotoba.test :refer [async]])
             [ipld.core :as ipld]
             [inga.fuel :as fuel]
             [inga.state :as state]))

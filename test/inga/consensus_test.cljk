@@ -3,7 +3,7 @@
   a whole n-witness validator set is simulated as plain data. Runs
   identically under `kbb -M:test` (JVM) and shadow-cljs :node-test."
   (:require [inga.consensus :as consensus]
-            #?(:clj [clojure.test :refer [deftest is testing]]
+            #?(:clj [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer-macros [deftest is testing]])))
 
 ;; ── quorum arithmetic ───────────────────────────────────────────────────────

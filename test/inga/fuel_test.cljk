@@ -3,7 +3,7 @@
   deterministically at the same block. The tests below take that literally —
   the interesting assertions are about WHERE two independent runs stop, not
   about whether metering runs."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.fuel :as fuel]))
 
 (def ops (mapv (fn [i] {:op :assert :i i}) (range 10)))

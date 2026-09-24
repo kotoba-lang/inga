@@ -1,7 +1,7 @@
 (ns inga.retrieval-test
   "What a retrieval sample can and cannot conclude. Every test here is a way
   a witness could otherwise be credited for storing nothing."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.power :as power]
             [inga.retrieval :as ret]))
 

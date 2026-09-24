@@ -12,7 +12,7 @@
   have to fold the whole log — and the whole point of the bounded form is that
   it throws away the very thing `replay` was reconstructing. So the bound has
   to be replaced by something that refuses at least as much."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.replica :as r]
             [inga.consensus :as c]
             [inga.sync :as sync]))

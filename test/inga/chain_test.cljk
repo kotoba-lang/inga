@@ -8,8 +8,8 @@
   that make the bridge worth having rather than about the bridge existing: an
   agent cannot advance someone else's chain, cannot skip a link, cannot fork,
   and cannot be silently skipped when a replica lacks the body."
-  (:require [clojure.test :refer [deftest is testing]]
-            #?(:cljs [clojure.test :refer [async]])
+  (:require [kotoba.test :refer [deftest is testing]]
+            #?(:cljs [kotoba.test :refer [async]])
             [ipld.core :as ipld]
             [inga.chain :as chain]
             [inga.state :as state]))

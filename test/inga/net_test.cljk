@@ -2,7 +2,7 @@
   "The failure modes here do not look like failures: a tight retry loop looks
   busy, an unbounded queue looks fine until the process dies, and a peer
   sending garbage looks like a peer."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.net :as net]))
 
 (def params net/default-params)
