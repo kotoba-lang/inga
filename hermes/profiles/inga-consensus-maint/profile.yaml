@@ -1,0 +1,9 @@
+description: Inga合意安全性と予約保証の継続担当。競合署名・相反確定の証拠を保全し、中央投票guard、決定的障害テスト、回帰検証を完成してレビュー用PRを作る。本番変更は別途承認。
+description_auto: false
+ui_meta:
+  hermes-bots:
+    shape: blobatar
+    color: '#2563eb'
+    imageKind: shape
+    title: Inga 合意安全性
+    created: 1789283192875
