@@ -29,7 +29,7 @@
   does not prove that recompiling that source today produces those bytes, which
   needs the compiler and the commit that built it. `:compiler` here is
   \"kotoba-compiler/1\", a tool name, not a commit."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [clojure.java.io :as io]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]])

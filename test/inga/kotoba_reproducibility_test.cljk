@@ -52,7 +52,7 @@
   interpreter arriving in the runtime dependency set, or a `src/` namespace
   requiring one, would make replicas' answers depend on a pin — and this is a
   consensus library, so that is the one class of dependency it cannot take."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [clojure.java.io :as io]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
