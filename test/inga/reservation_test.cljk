@@ -7,7 +7,7 @@
             [inga.head :as head]
             [inga.replica :as r]
             [inga-node.seams :as seams]
-            [clojure.edn :as edn]
+            [kotoba.lang.edn :as edn]
             ["node:crypto" :as crypto]))
 
 (def witnesses ["w1" "w2" "w3" "w4"])

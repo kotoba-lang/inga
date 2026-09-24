@@ -1,6 +1,6 @@
 (ns inga.segmented-prefix-test
   (:require [kotoba.test :refer [deftest is testing]]
-            [clojure.edn :as edn]
+            [kotoba.lang.edn :as edn]
             [inga.segmented-prefix :as segmented]
             [inga.reservation :as reservation]
             [inga.reservation-test :as fixture]

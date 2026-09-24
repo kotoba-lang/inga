@@ -3,7 +3,7 @@
   trusted state-root. All segments from genesis are rechecked for each call.
   Input is materialized; sequential decoding avoids a second full block vector.
   Signature and byte work remain O(history), not succinct checkpoint verification."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [inga.prefix :as prefix]
             [inga.sync :as sync]
             [inga.attest :as att]
