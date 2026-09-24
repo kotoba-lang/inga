@@ -407,7 +407,7 @@
   (testing "passing a db used to be correct; a silent empty result set would be worse"
     (let [m (machine-on (store))
           st (run m [ops-a])]
-      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+      (is (thrown? js/Error
                    (state/query (:db st) {:find '[?s] :where '[[?s "role" "witness"]]})))
       (is (= #{["alice"] ["bob"]}
              (state/query st {:find '[?s] :where '[[?s "role" "witness"]]}))
@@ -415,13 +415,13 @@
 
 (deftest an-actor-op-without-an-address-is-refused
   (let [m (machine-on (store))]
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (run m [[{:op :actor-put :actor {:balance 1}}]])))))
 
 (deftest a-code-that-is-not-a-cid-is-refused
   (testing "otherwise the failure is an NPE from inside the base32 decoder"
     (let [m (machine-on (store))]
-      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+      (is (thrown? js/Error
                    (run m [[{:op :actor-put :address "alice"
                              :actor {:code "transfer/v1" :balance 1}}]])))
       (is (some? (run m [[{:op :actor-put :address "alice"
@@ -690,14 +690,14 @@
 (deftest a-call-with-no-invoke-fn-is-a-deployment-error
   (testing "a replica that cannot run code must not quietly refuse what its peers execute"
     (let [m (governed-machine (store))]
-      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+      (is (thrown? js/Error
                    ((:apply-fn m) ((:init-fn m))
                     {:height 1 :ops [(put-alice code-cid)
                                      {:op :actor-call :address "alice" :caller "alice"}]}))))))
 
 (deftest an-invoke-fn-that-answers-with-neither-shape-is-a-deployment-error
   (let [m (governed-machine (store) (fn [_] :yes))]
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  ((:apply-fn m) ((:init-fn m))
                   {:height 1 :ops [(put-alice code-cid)
                                    {:op :actor-call :address "alice" :caller "alice"}]})))))
@@ -706,9 +706,9 @@
   (testing "a refusal nobody can locate in the chain is not a record"
     (let [base {:decode-block :ops :put! (fn [_ _]) :get-fn (constantly nil)
                 :blind-fn blind :encrypt-fn crypt}]
-      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+      (is (thrown? js/Error
                    (state/machine (assoc base :authority {}))))
-      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+      (is (thrown? js/Error
                    (state/machine (assoc base :invoke-fn (fn [_] {})))))
       (is (some? (state/machine (assoc base :authority {} :height-fn :height)))))))
 

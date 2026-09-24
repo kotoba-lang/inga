@@ -258,7 +258,7 @@
           ;; mutating the thing it was supposed to be about.
           thrown (try ((:apply-fn m) ((:init-fn m)) (block 1 "nobody-has-this"))
                       nil
-                      (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e
+                      (catch :default e
                         (ex-data e)))]
       (is (= :inga.chain/unresolved-proposal (:type thrown)))
       (is (= "nobody-has-this" (:proposal thrown))
@@ -277,7 +277,7 @@
         "and everything else has one")))
 
 (deftest the-bridge-refuses-to-be-built-without-a-resolver
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+  (is (thrown? js/Error
                (chain/decode-block nil))))
 
 ;; ── ordering is the whole product ──────────────────────────────────────────

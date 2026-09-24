@@ -256,7 +256,7 @@
 
 (deftest resume-rejects-a-snapshot-it-does-not-understand
   (let [s (get (run) :w1)]
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (r/resume (opts :w1) (assoc (r/snapshot s) :inga.snapshot/version 999))))))
 
 (deftest a-behind-replica-does-not-broadcast-its-tip-forever
