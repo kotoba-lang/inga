@@ -1,5 +1,5 @@
 (ns inga.payment-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.payment :as payment]))
 
 (deftest reservation-boundaries

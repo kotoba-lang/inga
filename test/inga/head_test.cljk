@@ -2,7 +2,7 @@
   "What a certificate has to prove. Every test here is a way a head could be
   accepted that must not be — the failure mode of a ref plane is silent
   acceptance, not a thrown exception."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.head :as head]))
 
 (def quorum 3)

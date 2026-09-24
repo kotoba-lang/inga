@@ -1,7 +1,7 @@
 (ns inga.pacemaker-test
   "Liveness is where home-grown BFT dies, and the failures are not crashes —
   they are a chain that stops while every replica is individually correct."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.consensus :as c]
             [inga.pacemaker :as pm]))
 

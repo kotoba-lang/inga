@@ -5,7 +5,7 @@
   The `:slash` tests also pin superproject ADR-2608055000 G2 (invariant I4, no
   adjudicator exists): a confiscation must carry the proof that justifies it
   and this fold must check it, so no proposer can decide who loses collateral."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.power :as power]
             [inga.stake :as stake]))
 

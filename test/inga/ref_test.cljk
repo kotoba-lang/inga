@@ -10,7 +10,7 @@
   it cannot read back), NOT evidence about any real quorum's agreement. Said
   plainly because a conformance suite run against an agreeable oracle is the
   easiest possible way to believe something false."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.head :as head]
             [inga.ref :as iref]
             [kotobase.storage.core :as storage]

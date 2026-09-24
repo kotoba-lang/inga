@@ -4,7 +4,7 @@
   identically under `kbb -M:test` (JVM) and cljs."
   (:require [inga.consensus :as consensus]
             [inga.stake :as stake]
-            #?(:clj [clojure.test :refer [deftest is testing]]
+            #?(:clj [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer-macros [deftest is testing]])))
 
 (defn- bond

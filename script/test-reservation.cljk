@@ -1,4 +1,4 @@
-(require '[clojure.test :as t] '[inga.reservation-test] '[inga.segmented-prefix-test])
+(require '[kotoba.test :as t] '[inga.reservation-test] '[inga.segmented-prefix-test])
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (when (pos? (+ (:fail m) (:error m))) (js/process.exit 1)))
 (t/run-tests 'inga.reservation-test 'inga.segmented-prefix-test)

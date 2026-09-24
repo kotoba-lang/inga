@@ -1,7 +1,7 @@
 (ns inga.sync-test
   "Sync is the one path where a replica takes a sequence of blocks from a
   stranger and adds it to what it believes."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.consensus :as c]
             [inga.sync :as sync]))
 

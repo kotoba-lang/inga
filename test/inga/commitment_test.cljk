@@ -4,7 +4,7 @@
   Every test states the attack it removes. A verifier's tests are the only
   place the checks are pinned in the order they have to run in."
   (:require [clojure.edn :as edn]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [inga.attest :as att]
             [inga.commitment :as cm]
             [inga.consensus :as c]

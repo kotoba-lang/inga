@@ -5,8 +5,8 @@
   Every namespace this composes was already tested. The composition was not,
   and a suite full of correct parts is exactly what a system that has never
   run looks like."
-  (:require [clojure.test :refer [deftest is testing]]
-            #?(:cljs [clojure.test :refer [async]])
+  (:require [kotoba.test :refer [deftest is testing]]
+            #?(:cljs [kotoba.test :refer [async]])
             [inga.replica :as r]
             [inga.attest :as att]
             [inga.consensus :as c]

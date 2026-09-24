@@ -1,5 +1,5 @@
 (ns inga.kotoba-order-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [inga.attest :as attest]
             [inga.consensus :as consensus]
             [inga.kotoba-order :as order]))

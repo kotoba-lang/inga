@@ -18,7 +18,7 @@
   delete it rather than adjust it when the gap closed. It is deleted, and
   `survives-the-departure-of-the-witness-due-to-lead` says the opposite in
   its place."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.replica :as r]
             [inga.consensus :as c]))
 

@@ -1,5 +1,5 @@
 (ns inga.reservation-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [inga.reservation :as reservation]
             [inga.commitment :as membership]
             [inga.consensus :as c]
