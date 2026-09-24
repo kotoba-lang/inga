@@ -190,14 +190,14 @@
 
 (deftest the-certificate-form-still-demands-its-seams
   (testing "dropping head-of! must not make the original form lenient"
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (iref/ref-store {:read-head! (constantly nil)
                                   :write-head! (fn [_ _] nil)
                                   :propose! (constantly nil)
                                   :verify-fn verify-fn
                                   ;; no admitted?
                                   :quorum quorum})))
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (iref/ref-store {:read-head! (constantly nil)
                                   :write-head! (fn [_ _] nil)
                                   :propose! (constantly nil)
