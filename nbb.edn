@@ -5,6 +5,11 @@
 ;; :paths and every sha below are COPIED from deps.edn, not chosen here.
 {:paths ["src" "."]
  :deps {
+        ;; kotoba.io replaced clojure.java.io / java.io.File here (2026-09-24).
+        ;; An explicit floor: the java.io.File method functions (exists?, file?,
+        ;; parent-file, canonical-path, mkdirs, list-files ...) are in kotoba.io
+        ;; from this sha, and tools.deps takes the NEWEST sha it is shown.
+        io.github.kotoba-lang/io {:git/sha "72dde04b4c32854d70d17a670b277f8f7957a784"}
         ;; kotoba.lang.coll replaced clojure.set here (2026-09-24). An explicit
         ;; floor: kotoba.lang.coll carries clojure.set's union/intersection/
         ;; difference/map-invert from 0ffd5f6, and tools.deps takes the NEWEST
