@@ -17,7 +17,7 @@
   wasm32` from a CLI whose version was not written down anywhere in the repo —
   which is how a binary comes to be built by a compiler nobody can name. The
   pin in `deps.edn` is now that name."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.io :as io]
             [inga.kotoba-reproducibility-test :as gate])
   (:gen-class))
 
@@ -29,7 +29,7 @@
         record (io/file "kotoba" (str base ".wasm.provenance.edn"))]
     (with-open [out (io/output-stream wasm)] (.write out ^bytes bytes))
     (spit record (pr-str provenance))
-    [(.getPath wasm) (.getPath record)]))
+    [(io/path wasm) (io/path record)]))
 
 (defn -main [& _]
   (run! println (mapcat regenerate! gate/cores))

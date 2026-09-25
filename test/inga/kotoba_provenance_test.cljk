@@ -30,14 +30,14 @@
   needs the compiler and the commit that built it. `:compiler` here is
   \"kotoba-compiler/1\", a tool name, not a commit."
   (:require [kotoba.lang.edn :as edn]
-            [clojure.java.io :as io]
+            [kotoba.io :as io]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]])
   (:import (java.security MessageDigest)))
 
 (def ^:private kotoba-dir (io/file "kotoba"))
 
-(defn- bytes-of [^java.io.File f]
+(defn- bytes-of [f]
   (with-open [in (io/input-stream f)] (.readAllBytes in)))
 
 (defn- sha256 [^bytes b]
@@ -46,11 +46,11 @@
        (apply str)))
 
 (defn- records []
-  (->> (.listFiles kotoba-dir)
-       (filter #(str/ends-with? (.getName %) ".wasm.provenance.edn"))
-       (sort-by #(.getName %))
+  (->> (io/list-files kotoba-dir)
+       (filter #(str/ends-with? (io/file-name %) ".wasm.provenance.edn"))
+       (sort-by #(io/file-name %))
        (map (fn [f]
-              (let [base (str/replace (.getName f) #"\.wasm\.provenance\.edn$" "")]
+              (let [base (str/replace (io/file-name f) #"\.wasm\.provenance\.edn$" "")]
                 {:base base
                  :record (edn/read-string (slurp f))
                  :wasm (io/file kotoba-dir (str base ".wasm"))
@@ -59,18 +59,18 @@
 (deftest every-wasm-has-a-provenance-record
   ;; The direction that catches a binary added without one, rather than a record
   ;; left behind by a binary that was removed.
-  (let [wasms (->> (.listFiles kotoba-dir)
-                   (filter #(str/ends-with? (.getName %) ".wasm"))
-                   (map #(.getName %)))]
+  (let [wasms (->> (io/list-files kotoba-dir)
+                   (filter #(str/ends-with? (io/file-name %) ".wasm"))
+                   (map #(io/file-name %)))]
     (is (<= 2 (count wasms)) "wasm count only grows")
     (doseq [w wasms]
-      (is (.exists (io/file kotoba-dir (str w ".provenance.edn")))
+      (is (io/exists? (io/file kotoba-dir (str w ".provenance.edn")))
           (str w " ships with no provenance record")))))
 
 (deftest the-recorded-source-digest-is-this-source
   (doseq [{:keys [base record source]} (records)]
-    (is (.exists source) (str base ".kotoba is missing"))
-    (when (.exists source)
+    (is (io/exists? source) (str base ".kotoba is missing"))
+    (when (io/exists? source)
       (is (= (:source-sha256 record) (sha256 (bytes-of source)))
           (str base ".kotoba does not hash to the :source-sha256 its provenance"
                " records — the checked-in wasm was built from a different source."
@@ -78,8 +78,8 @@
 
 (deftest the-recorded-output-digest-and-size-are-this-binary
   (doseq [{:keys [base record wasm]} (records)]
-    (is (.exists wasm) (str base ".wasm is missing"))
-    (when (.exists wasm)
+    (is (io/exists? wasm) (str base ".wasm is missing"))
+    (when (io/exists? wasm)
       (let [b (bytes-of wasm)
             primary (get-in record [:outputs :primary])]
         (is (= :wasm (:format primary)) (str base " primary output is not wasm"))

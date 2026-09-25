@@ -53,7 +53,7 @@
   requiring one, would make replicas' answers depend on a pin — and this is a
   consensus library, so that is the one class of dependency it cannot take."
   (:require [kotoba.lang.edn :as edn]
-            [clojure.java.io :as io]
+            [kotoba.io :as io]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.core :as compiler]
@@ -69,9 +69,9 @@
 (def cores
   "The `.kotoba` under `kotoba/`, discovered rather than listed, so a core added
   without a binary fails here instead of being quietly untested."
-  (->> (.listFiles (io/file "kotoba"))
-       (filter #(str/ends-with? (.getName %) ".kotoba"))
-       (map #(str/replace (.getName %) #"\.kotoba$" ""))
+  (->> (io/list-files (io/file "kotoba"))
+       (filter #(str/ends-with? (io/file-name %) ".kotoba"))
+       (map #(str/replace (io/file-name %) #"\.kotoba$" ""))
        sort
        vec))
 
@@ -184,11 +184,11 @@
   ;; one. Checked over the text of `src/` because that is the thing a reviewer
   ;; would otherwise have to check by reading — a require added in a namespace
   ;; nobody re-reads is precisely how a test-only dependency stops being one.
-  (doseq [f (->> (file-seq (io/file "src"))
-                 (filter #(.isFile ^java.io.File %))
-                 (filter #(re-find #"\.clj[cs]?$" (.getName ^java.io.File %))))]
+  (doseq [f (->> (io/file-seq (io/file "src"))
+                 (filter #(io/file? %))
+                 (filter #(re-find #"\.clj[cs]?$" (io/file-name %))))]
     (let [text (slurp f)]
       (doseq [forbidden ["kotoba.compiler" "kotoba.kir" "kototama."]]
         (is (not (str/includes? text forbidden))
-            (str (.getPath ^java.io.File f) " references " forbidden
+            (str (io/path f) " references " forbidden
                  " — that moves a decision onto a pin every replica must share."))))))
