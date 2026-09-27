@@ -1,0 +1,7 @@
+(require '[kotoba.test :as t]
+         '[inga.finality-test])
+
+(defmethod t/report [:cljs.test/default :end-run-tests] [m]
+  (when (pos? (+ (:fail m) (:error m))) (js/process.exit 1)))
+
+(t/run-tests 'inga.finality-test)

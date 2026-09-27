@@ -628,6 +628,22 @@
           :hash ((:hash-fn state) block)
           :outcome outcome}))
 
+(defn- committed-hash-at
+  "The final block at height h, or nil when it is outside the retained tail."
+  [state h]
+  (some (fn [block]
+          (when (= h (:inga.block/height block))
+            ((:hash-fn state) block)))
+        (concat (:committed state) (:chain state))))
+
+(defn- conflicts-with-commit?
+  "A finalized height cannot acquire another block in a later view."
+  [state h block-hash]
+  (let [final-height (if-let [b (peek (:committed state))]
+                       (:inga.block/height b) -1)]
+    (and (<= h final-height)
+         (not= block-hash (committed-hash-at state h)))))
+
 (defn- handle-proposal
   [state {:keys [block]} now]
   (let [state (remember-block state block)
@@ -635,6 +651,9 @@
         parent (get (:by-hash state) (:inga.block/parent-hash block))
         h (:inga.block/height block)]
     (cond
+      (conflicts-with-commit? state h (hf block))
+      [(note-proposal state block :conflicts-with-committed) []]
+
       ;; nothing to check it against — ask for what is missing rather than
       ;; voting on a block whose parent this replica has never seen
       (nil? parent)
@@ -807,19 +826,24 @@
                 (verify witness
                         (att/vote-payload (:chain-id state) view height
                                           block-hash witness)
-                        sig))]
-   (if-not ok?
+                        sig))
+        finality-conflict? (conflicts-with-commit? state height block-hash)]
+   (if (or (not ok?) finality-conflict?)
     ;; Dropped, not counted and not answered. A replica that replied would be
     ;; telling a forger which of its guesses were closer — and that silence is
     ;; also why a chain whose votes are being dropped looks exactly like a
     ;; chain whose votes are not being sent. Counted, so the two can be told
     ;; apart without asking the sender.
     [(-> state
-         (update-in [:dropped-votes (if sig :did-not-verify :unsigned)]
+         (update-in [:dropped-votes (if-not ok?
+                                     (if sig :did-not-verify :unsigned)
+                                     :conflicts-with-committed)]
                     (fnil inc 0))
          (assoc :last-dropped-vote
-                {:witness witness :height height :view view
-                 :block-hash block-hash :had-sig (boolean sig)}))
+                (cond-> {:witness witness :height height :view view
+                         :block-hash block-hash :had-sig (boolean sig)}
+                  (and ok? finality-conflict?)
+                  (assoc :reason :conflicts-with-committed))))
      []]
     (let [vote (cond-> (assoc (c/make-vote witness block-hash height)
                               :inga.vote/view view)
