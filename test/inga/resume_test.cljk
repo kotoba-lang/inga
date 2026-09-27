@@ -32,7 +32,8 @@
     (if (or (empty? ob) (>= steps max-steps))
       rs
       (let [[{:keys [from to msg]} & more] ob
-            targets (if (= :all to) (sort (keys rs)) [to])
+            targets (if (= :all to) (sort (keys rs))
+                        [(if (string? to) (keyword to) to)])
             [rs' produced]
             (reduce (fn [[rs acc] w]
                       (if (= w from)

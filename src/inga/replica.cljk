@@ -659,7 +659,7 @@
       (nil? parent)
       [(note-proposal state block :no-parent)
        [{:to :all :msg {:type :sync-request
-                              :witness (:id state)
+                              :witness (:witness state)
                               :from (inc (height state))
                               :to (:inga.block/height block)}}]]
 
@@ -1167,18 +1167,46 @@
             ;; three went to two and stopped there, because three is the
             ;; quorum and there was no margin left for a single lost message.
             behind (- (:inga.qc/height high-qc -1) (height state))
-            ask (when (pos? behind)
+            rival? (and high-qc (zero? behind)
+                        (not= (:inga.qc/block-hash high-qc)
+                              ((:hash-fn state) (tip state))))
+            ask (cond
+                  rival?
+                  (let [from (max 1 (inc (committed-height state)))
+                        to (:inga.qc/height high-qc)]
+                    (when (and (<= from to)
+                               (< (- to from) (:max-batch sync/default-params)))
+                      [{:to :all :msg {:type :sync-request
+                                       :witness (:witness state)
+                                       :from from :to to
+                                       :target-hash (:inga.qc/block-hash high-qc)}}]))
+                  (pos? behind)
                   (when-let [r (sync/request (height state)
                                              (:inga.qc/height high-qc)
                                              sync/default-params)]
                     [{:to :all :msg (assoc r :type :sync-request
-                                             :witness (:id state))}]))]
+                                             :witness (:witness state))}]))]
         (if-let [tc (pm/timeout-certificate (vec msgs) (:quorum state))]
           (let [state (update state :pm pm/on-timeout-certificate tc now (:params state))
                 [state out] (propose state now)]
             [state (into (vec ask) out)])
           (let [state (sync-view state now)]
             [state (vec ask)]))))))
+
+(defn- target-segment
+  "Walk a known certified branch back to the requested height. A current
+  chain-only answer cannot repair a same-height fork. Missing ancestry gets
+  no answer; the requester must try another peer."
+  [state target-hash from to cap]
+  (loop [hash target-hash blocks []]
+    (let [b (get (:by-hash state) hash)
+          h (:inga.block/height b)]
+      (cond
+        (or (nil? b) (not= hash ((:hash-fn state) b))
+            (not (integer? h)) (> h to) (< h from)
+            (>= (count blocks) cap)) nil
+        (= h from) (vec (reverse (conj blocks b)))
+        :else (recur (:inga.block/parent-hash b) (conj blocks b))))))
 
 (defn- handle-sync-request
   "Answer with at most `:max-batch` blocks.
@@ -1223,15 +1251,18 @@
   sees it and answer from storage — `torihiki-node`'s validator does this in
   `answerSyncRequests`. A host that keeps the whole chain in memory can leave
   this alone."
-  [state {:keys [from to witness]}]
+  [state {:keys [from to witness target-hash]}]
   (let [cap (:max-batch sync/default-params)
-        blocks (->> (:chain state)
-                    (filter #(<= from (:inga.block/height %) to))
-                    (take cap)
-                    vec)]
+        blocks (if target-hash
+                 (target-segment state target-hash from to cap)
+                 (->> (:chain state)
+                      (filter #(<= from (:inga.block/height %) to))
+                      (take cap)
+                      vec))]
     [state (if (seq blocks)
              [{:to (or witness :all)
-               :msg {:type :sync-response :blocks blocks}}]
+               :msg (cond-> {:type :sync-response :blocks blocks}
+                      target-hash (assoc :target-hash target-hash))}]
              [])]))
 
 (defn- vote-on-tip
@@ -1274,10 +1305,29 @@
   where this replica's history ends by appending garbage to a good answer —
   which is `inga.sync`'s reasoning, and the reason to call it rather than to
   re-implement a weaker version of it here."
-  [state {:keys [blocks]} now]
+  [state {:keys [blocks target-hash]} now]
   (let [segment (vec (sort-by :inga.block/height blocks))
+        target-qc (when target-hash
+                    (or (get-in state [:qcs target-hash])
+                        (when (= target-hash (get-in state [:pm :high-qc :inga.qc/block-hash]))
+                          (get-in state [:pm :high-qc]))))
+        target-refusal (when target-hash
+                         (cond
+                           (empty? segment) :empty-target-segment
+                           (not= target-hash ((:hash-fn state) (peek segment)))
+                           :wrong-certified-target
+                           (not= (:inga.qc/height target-qc)
+                                 (:inga.block/height (peek segment)))
+                           :missing-target-certificate
+                           (some? (att/verify-certificate
+                                   target-qc (:chain-id state) (:quorum state)
+                                   (:verify-fn state)
+                                   (wire/admits (:witnesses state))))
+                           :invalid-target-certificate))
         {:keys [chain adopted reason]}
-        (sync/sync-step (:hash-fn state) (:quorum state) (:chain state) segment
+        (if target-refusal
+          {:chain (:chain state) :adopted 0 :reason target-refusal}
+          (sync/sync-step (:hash-fn state) (:quorum state) (:chain state) segment
                         ;; The witness set travels with the params so that
                         ;; `validate-segment` can refuse a block whose
                         ;; proposer does not lead its height. Without it a
@@ -1293,7 +1343,7 @@
                                ;; the refusal so a real safety alarm can never be
                                ;; read as ordinary sync noise.
                                :floor (committed-height state))
-                        (:chain-id state) (:verify-fn state))
+                        (:chain-id state) (:verify-fn state)))
         ;; Refusing a segment says nothing to anybody, correctly — and a
         ;; replica that cannot catch up looks exactly like a replica nobody is
         ;; answering. `inga.sync` has a closed set of reasons; this records
@@ -1540,16 +1590,24 @@
               ;; one message in nine. **The recovery was eating the transport
               ;; it needed.** A replica that has asked and not been helped
               ;; should ask LESS often, not more.
+              high (get-in state' [:pm :high-qc])
+              rival? (and high (= (:inga.qc/height high) (height state'))
+                          (not= (:inga.qc/block-hash high)
+                                ((:hash-fn state') (tip state'))))
+              from (if rival? (max 1 (inc (committed-height state')))
+                             (sync-ask-from state'))
               ask (when-not (or (= (:view (:pm state')) (:last-sync-ask state))
-                                (< now (+ (:last-sync-ask-at state 0) sync-ask-ms)))
+                                (< now (+ (:last-sync-ask-at state 0) sync-ask-ms))
+                                (and rival? (or (> from (height state'))
+                                                (>= (- (height state') from)
+                                                    (:max-batch sync/default-params)))))
                     [{:to :all
-                      :msg {:type :sync-request
-                            :witness (:id state')
-                            :from (sync-ask-from state')
-                            ;; We do not know the target, so ask for a window
-                            ;; above us. `handle-sync-request` answers with
-                            ;; what it actually holds.
-                            :to (+ (height state') (:max-batch sync/default-params))}}])
+                      :msg (cond-> {:type :sync-request
+                                    :witness (:witness state')
+                                    :from from
+                                    :to (if rival? (height state')
+                                            (+ (height state') (:max-batch sync/default-params)))}
+                             rival? (assoc :target-hash (:inga.qc/block-hash high)))}])
               state' (cond-> state'
                        ask (assoc :last-sync-ask (:view (:pm state'))
                                   :last-sync-ask-at now))]
@@ -1739,13 +1797,27 @@
   [state]
   (let [chain (vec (take-last resume-tail (:chain state)))
         hf (:hash-fn state)
-        kept (into #{} (map hf) chain)]
+        high-hash (get-in state [:pm :high-qc :inga.qc/block-hash])
+        ;; A certified rival can be at the SAME height as our uncertified
+        ;; tip. Dropping it from :by-hash on restart leaves a valid high QC
+        ;; pointing to bytes that no witness can serve. Keep its uncommitted
+        ;; ancestry as well as the chosen chain's bounded tail.
+        rival-ancestry (loop [hash high-hash kept #{} steps 0]
+                         (let [b (get (:by-hash state) hash)]
+                           (if (or (nil? b) (not= hash (hf b))
+                                   (<= (:inga.block/height b) (committed-height state))
+                                   (>= steps resume-tail))
+                             kept
+                             (recur (:inga.block/parent-hash b)
+                                    (conj kept hash) (inc steps)))))
+        kept (into rival-ancestry (map hf) chain)]
     {:inga.snapshot/version snapshot-version
      :witness (:witness state)
      :chain chain
      :by-hash (select-keys (:by-hash state) kept)
-     ;; Only the certificates that name a block we still hold. A qc for a
-     ;; block outside the tail cannot be checked against anything.
+     ;; Only certificates naming retained blocks. The high QC itself is also
+     ;; restored from :pm by resume, including when its block is still being
+     ;; requested from another witness.
      :qcs (into {} (filter (fn [[bh _]] (contains? kept bh)) (:qcs state)))
      :pm (:pm state)
      :voted-below (:inga.block/height (peek chain))
@@ -1767,14 +1839,24 @@
   more. `resume` is for the caller that does not have the time, which on a
   Durable Object is every caller past a few hundred blocks."
   [opts snapshot]
-  (let [v (:inga.snapshot/version snapshot)]
+  (let [base (replica opts)
+        v (:inga.snapshot/version snapshot)
+        high (get-in snapshot [:pm :high-qc])
+        verify (:verify-fn base)]
     (when-not (= v snapshot-version)
       (throw (ex-info "inga.replica: unknown snapshot version"
                       {:found v :expected snapshot-version})))
-    (merge (replica opts)
+    (when (and high verify
+               (not (zero? (:inga.qc/height high -1)))
+               (some? (att/verify-certificate high (:chain-id base)
+                                              (:quorum base) verify
+                                              (wire/admits (:witnesses base)))))
+      (throw (ex-info "inga.replica: invalid snapshot high QC" {})))
+    (merge base
            {:chain (vec (:chain snapshot))
             :by-hash (:by-hash snapshot)
-            :qcs (:qcs snapshot)
+            :qcs (cond-> (:qcs snapshot)
+                   high (update (:inga.qc/block-hash high) pm/higher-qc high))
             :pm (:pm snapshot)
             :voted #{}
             :voted-below (:voted-below snapshot)

@@ -29,7 +29,9 @@
              {:type :new-view :witness "w3" :view 9 :high-qc (qc)}
              {:type :new-view :witness "w3" :view 9 :high-qc nil}
              {:type :sync-request :from 10 :to 40}
-             {:type :sync-response :blocks [(block)]}]]
+             {:type :sync-request :from 5 :to 5 :witness "w2" :target-hash "certified-rival"}
+             {:type :sync-response :blocks [(block)]}
+             {:type :sync-response :blocks [(block)] :target-hash "certified-rival"}]]
     (is (w/round-trip? m) (str "did not survive: " (:type m)))))
 
 (deftest a-certificate-keeps-its-view
@@ -55,7 +57,9 @@
                 {"t" "proposal" "block" {"height" 1}}
                 {"t" "sync-request" "from" 9 "to" 2}
                 {"t" "sync-request" "from" "a" "to" 2}
+                {"t" "sync-request" "from" 1 "to" 2 "target-hash" 7}
                 {"t" "sync-response" "blocks" "not-a-vector"}
+                {"t" "sync-response" "blocks" [] "target-hash" 7}
                 {"t" "new-view" "witness" "w" "view" 1 "high-qc" {"height" "x"}}]]
     (let [[m r] (w/decode junk)]
       (is (nil? m) (str "should not decode: " (pr-str junk)))
