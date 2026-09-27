@@ -233,8 +233,10 @@
                  "vote-a" (enc-vote (:inga.evidence/vote-a e))
                  "vote-b" (enc-vote (:inga.evidence/vote-b e))})
     :sync-request (cond-> {"t" "sync-request" "from" (:from msg) "to" (:to msg)}
-                    (:witness msg) (assoc "w" (:witness msg)))
-    :sync-response {"t" "sync-response" "blocks" (mapv enc-block (:blocks msg))}
+                    (:witness msg) (assoc "w" (:witness msg))
+                    (:target-hash msg) (assoc "target-hash" (:target-hash msg)))
+    :sync-response (cond-> {"t" "sync-response" "blocks" (mapv enc-block (:blocks msg))}
+                     (:target-hash msg) (assoc "target-hash" (:target-hash msg)))
     (throw (ex-info "inga.wire: cannot encode unknown message type"
                     {:type (:type msg)}))))
 
@@ -321,21 +323,28 @@
        ;; this replica carry somebody else's payload.
        (if (and (nat? (get m "from")) (nat? (get m "to"))
                 (<= (get m "from") (get m "to"))
-                (or (nil? (get m "w")) (str-ok? (get m "w") limits)))
+                (or (nil? (get m "w")) (str-ok? (get m "w") limits))
+                (or (nil? (get m "target-hash"))
+                    (str-ok? (get m "target-hash") limits)))
          [(cond-> {:type :sync-request :from (get m "from") :to (get m "to")}
-            (get m "w") (assoc :witness (get m "w"))) nil]
+            (get m "w") (assoc :witness (get m "w"))
+            (get m "target-hash") (assoc :target-hash (get m "target-hash"))) nil]
          [nil :bad-shape])
 
        "sync-response"
        (let [bs (get m "blocks")]
          (cond
            (not (vector? bs)) [nil :bad-shape]
+           (and (some? (get m "target-hash"))
+                (not (str-ok? (get m "target-hash") limits))) [nil :bad-shape]
            (> (count bs) (:max-blocks limits)) [nil :too-large]
            :else
            (let [decoded (mapv #(dec-block % limits) bs)]
              (if (some nil? decoded)
                [nil :bad-shape]
-               [{:type :sync-response :blocks decoded} nil]))))))))
+               [(cond-> {:type :sync-response :blocks decoded}
+                  (get m "target-hash") (assoc :target-hash (get m "target-hash")))
+                nil]))))))))
 
 (defn json-safe?
   "Is `x` made only of things JSON carries — strings, numbers, booleans, nil,
