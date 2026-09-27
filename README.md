@@ -842,6 +842,28 @@ The shared toolchain must register `.cljk` namespace resolution (including
 platform-collision names recorded in `cljk-origin.edn`) before this nbb suite
 can qualify the canonical source layout.
 
+### Paged complete-history verifier
+
+`inga.paged-prefix` verifies the `inga-node` opt-in archive pages without a
+total block-count ceiling. Call `begin` with a trusted empty genesis, ordered
+witness keys, chain ID, quorum, real hash and signature functions, and the
+existing context fields. Feed each decoded
+`/local-finalized-range?from=<height>&limit=128` response to `append-page`
+in order, then call `finish` with a fixed `/local-finalized-checkpoint`
+response. Only `finish` returning `{:status :finalized ...}` authenticates the
+complete prefix. The client must cap each HTTP response at 8 MiB **before**
+parsing EDN and must not restore verifier state from an untrusted peer.
+
+Each page is limited to 128 blocks. The verifier checks exact genesis,
+contiguous heights, parent links, proposer order, parent QCs, checkpoint
+anchor, both finality descendants, and the signed tip QC. It retains the last
+block and a two-block finality window, so verification space is bounded by
+one page plus those blocks. Work and network transfer remain O(history), and
+this is not a succinct state root or proof that no newer tip exists. Tests
+compare it with `inga.prefix/verify` using real Ed25519 certificates, reject
+gaps and tampering, and cross the 8192-block boundary with a cheap synthetic
+signature seam. The latter checks scaling and boundaries, not cryptography.
+
 ### Segmented complete-prefix candidate
 
 `inga.segmented-prefix/verify-acquisition` is an additive, pure candidate API.
