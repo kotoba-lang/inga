@@ -1117,6 +1117,25 @@
   [state witness view outcome]
   (assoc state :last-new-view {:witness witness :view view :outcome outcome}))
 
+(defn- certified-sync-request
+  "Ask for the whole certified uncommitted branch when it fits one bounded
+  response. Starting above the local tip cannot repair a fork below that tip."
+  [state qc]
+  (let [to (:inga.qc/height qc)
+        from (max 1 (inc (committed-height state)))
+        local-height (height state)
+        different? (and (= to local-height)
+                        (not= (:inga.qc/block-hash qc)
+                              ((:hash-fn state) (tip state))))]
+    (when (and qc (integer? to)
+               (or (> to local-height) different?)
+               (<= from to)
+               (< (- to from) (:max-batch sync/default-params)))
+      {:type :sync-request
+       :witness (:witness state)
+       :from from :to to
+       :target-hash (:inga.qc/block-hash qc)})))
+
 (defn- handle-new-view
   [state {:keys [witness view high-qc sig] :as msg} now]
   (let [witness (wire/wire-id witness)
@@ -1167,19 +1186,10 @@
             ;; three went to two and stopped there, because three is the
             ;; quorum and there was no margin left for a single lost message.
             behind (- (:inga.qc/height high-qc -1) (height state))
-            rival? (and high-qc (zero? behind)
-                        (not= (:inga.qc/block-hash high-qc)
-                              ((:hash-fn state) (tip state))))
+            target-request (certified-sync-request state high-qc)
             ask (cond
-                  rival?
-                  (let [from (max 1 (inc (committed-height state)))
-                        to (:inga.qc/height high-qc)]
-                    (when (and (<= from to)
-                               (< (- to from) (:max-batch sync/default-params)))
-                      [{:to :all :msg {:type :sync-request
-                                       :witness (:witness state)
-                                       :from from :to to
-                                       :target-hash (:inga.qc/block-hash high-qc)}}]))
+                  target-request
+                  [{:to :all :msg target-request}]
                   (pos? behind)
                   (when-let [r (sync/request (height state)
                                              (:inga.qc/height high-qc)
@@ -1591,23 +1601,16 @@
               ;; it needed.** A replica that has asked and not been helped
               ;; should ask LESS often, not more.
               high (get-in state' [:pm :high-qc])
-              rival? (and high (= (:inga.qc/height high) (height state'))
-                          (not= (:inga.qc/block-hash high)
-                                ((:hash-fn state') (tip state'))))
-              from (if rival? (max 1 (inc (committed-height state')))
-                             (sync-ask-from state'))
+              target-request (certified-sync-request state' high)
+              from (sync-ask-from state')
               ask (when-not (or (= (:view (:pm state')) (:last-sync-ask state))
-                                (< now (+ (:last-sync-ask-at state 0) sync-ask-ms))
-                                (and rival? (or (> from (height state'))
-                                                (>= (- (height state') from)
-                                                    (:max-batch sync/default-params)))))
+                                (< now (+ (:last-sync-ask-at state 0) sync-ask-ms)))
                     [{:to :all
-                      :msg (cond-> {:type :sync-request
-                                    :witness (:witness state')
-                                    :from from
-                                    :to (if rival? (height state')
-                                            (+ (height state') (:max-batch sync/default-params)))}
-                             rival? (assoc :target-hash (:inga.qc/block-hash high)))}])
+                      :msg (or target-request
+                               {:type :sync-request
+                                :witness (:witness state')
+                                :from from
+                                :to (+ (height state') (:max-batch sync/default-params))})}])
               state' (cond-> state'
                        ask (assoc :last-sync-ask (:view (:pm state'))
                                   :last-sync-ask-at now))]

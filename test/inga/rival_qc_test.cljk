@@ -25,10 +25,11 @@
                     [:w2 :w3 :w4])]
     (att/certify (c/qc votes 4 0) votes)))
 (defn- certified-child [parent height]
-  (c/make-block {:height height :parent-hash (hash-fn parent) :proposals []
-                 :proposer (name (c/leader-for witnesses height)) :ts (* 10 height)
-                 :justify (genuine-cert (hash-fn parent)
-                                        (:inga.block/height parent))}))
+  (let [justify (genuine-cert (hash-fn parent) (:inga.block/height parent))
+        round (c/entitled-round parent)]
+    (c/make-block {:height height :parent-hash (hash-fn parent) :proposals []
+                   :proposer (name (c/leader-for witnesses round))
+                   :ts (* 10 height) :round round :justify justify})))
 (defn- nv [w view high-qc]
   (let [id (name w)]
     {:type :new-view :witness id :view view :high-qc high-qc
@@ -93,6 +94,42 @@
     (is (try (r/resume opts tampered) false
              (catch :default e
                (= "inga.replica: invalid snapshot high QC" (ex-message e)))))))
+
+(deftest an-ahead-certified-branch-rewinds-from-the-committed-floor
+  (let [opts (opts :w1)
+        initial (r/replica opts)
+        genesis (r/tip initial)
+        local (certified-child genesis 1)
+        rival (update local :inga.block/ts inc)
+        target-block (certified-child rival 2)
+        target (hash-fn target-block)
+        qc (genuine-cert target 2)
+        requester (assoc initial :chain [genesis local]
+                         :by-hash {(hash-fn genesis) genesis
+                                   (hash-fn local) local})
+        responder (-> initial
+                      (assoc :chain [genesis rival target-block]
+                             :by-hash {(hash-fn genesis) genesis
+                                       (hash-fn rival) rival
+                                       target target-block}
+                             :qcs {target qc})
+                      (assoc-in [:pm :high-qc] qc))
+        restored (r/resume opts (r/snapshot responder))
+        [requester requests] (r/on-message requester (nv :w2 8 qc) 1000)
+        request (:msg (first (filter #(= :sync-request (:type (:msg %))) requests)))
+        [decoded-request request-refusal] (wire/decode (wire/encode request))
+        [_ responses] (r/on-message restored decoded-request 1001)
+        response (:msg (first responses))
+        [decoded-response response-refusal] (wire/decode (wire/encode response))
+        [recovered _] (r/on-message requester decoded-response 1002)]
+    (is (= {:type :sync-request :witness "w1" :from 1 :to 2
+            :target-hash target} request)
+        "a higher QC must ask from the committed floor, not the divergent tip")
+    (is (nil? request-refusal))
+    (is (= [rival target-block] (:blocks response)))
+    (is (nil? response-refusal))
+    (is (= target (hash-fn (r/tip recovered))) (pr-str (:last-sync recovered)))
+    (is (= 2 (r/height recovered)))))
 
 (deftest a-targeted-response-cannot-replace-a-chain-with-a-different-block
   (let [opts (opts :w1)
