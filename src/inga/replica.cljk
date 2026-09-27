@@ -1343,6 +1343,15 @@
       (-> state
           (assoc :chain chain)
           (as-> s (reduce remember-block s segment))
+          ;; sync-step verified the adopted blocks and their parent QCs. Keep
+          ;; those QCs before committing: the durable sink needs the record
+          ;; block's QC to write its proof sidecar after an offline catch-up.
+          (as-> s (reduce (fn [s block]
+                           (if-let [qc (:inga.block/justify block)]
+                             (update-in s [:qcs (:inga.qc/block-hash qc)]
+                                        pm/higher-qc qc)
+                             s))
+                         s (take-last adopted chain)))
           absorb-commits
           (vote-on-tip now))
       [state []])))
