@@ -554,22 +554,30 @@ nothing that grows with the chain.
 
 ### The dangerous part is `:voted`
 
-A replica must never vote twice at one height — that is equivocation, the one
-thing this system slashes for, and it is invisible from the inside: nothing in
-the replica's own state looks wrong afterwards. `replay` was reconstructing
-`:voted` by folding the blocks. A bounded snapshot cannot, by definition.
+A replica must never sign different blocks in one view. The durable
+`:voted-view` stops a second signature in that view even if sync changes the
+tip or restart clears the vote cache. A cached vote can be resent byte for
+byte; a later view may sign again under the pacemaker's safe-to-vote rule.
+`replay` was reconstructing `:voted` by folding the blocks. A bounded
+snapshot cannot, by definition.
 
-So the set is replaced by a **watermark**: `:voted-below` = the tip height, and
-`voted?` answers true at or under it whether or not the set still names the
-height. The watermark only ever makes that answer MORE often, and that is the
-safe direction — refusing costs a vote at a height already decided; not
-refusing is equivocation. A resumed replica cannot legitimately need to vote at
-or below the tip it resumed on: it voted for the block it adopted at each of
-those heights, and every proposal it sees from now on is above them.
+So the set is replaced by a **height watermark**: `:voted-below` = the tip
+height, and `voted?` answers true at or under it whether or not the set still
+names the height. This reconstruction is conservative, but it cannot replace
+the view watermark: an uncertified vote may not be present in the adopted
+chain. A host must persist the new snapshot before sending its vote.
 
 `test/inga/resume_test.cljk` was written before the implementation and asserts
 the property directly — every block the replica holds is offered back to it and
 every vote that leaves is checked against the block it actually adopted.
+
+`script/test-vote-watermark.cljk` checks the final signing gate with real
+Ed25519 signatures: alternate-tip sync and restart cannot produce conflicting
+same-view votes; a cached vote is resent unchanged; a later view can vote;
+a conflicting locked tip is refused.
+This guard does not repair a previously forked chain or fence a consumer that
+has already begun a side effect. A production writer needs a fresh qualified
+chain and an operation-level fencing check.
 
 ### Two things this cost
 

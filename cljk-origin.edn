@@ -73,4 +73,6 @@
   "script/test-reservation.cljk" ".cljs"
   "src/inga/segmented_prefix.cljk" ".cljc"
   "test/inga/segmented_prefix_test.cljk" ".cljs"
+  "test/inga/vote_watermark_test.cljk" ".cljs"
+  "script/test-vote-watermark.cljk" ".cljs"
  }}
