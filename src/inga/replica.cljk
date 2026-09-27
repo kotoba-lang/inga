@@ -305,23 +305,9 @@
 ;; tip, one on another, and one behind. Every replica reported
 ;; `no-certificate-for-the-tip`; every one of them had already voted.
 ;;
-;; ## Why it is still here
-;;
-;; Changing it to one-vote-per-view was written and REVERTED. The rule needs
-;; the view a replica last voted in to survive a restart, and it does not:
-;; votes are memory. The obvious watermark — the tip's round — is not an upper
-;; bound, because a replica can have voted for a block at a higher round that
-;; never certified and so is not in its chain. Coming back below that view and
-;; voting again is equivocation, which is the one thing this system slashes
-;; for.
-;;
-;; Doing it properly means making the last voted view DURABLE: written when it
-;; changes, read on resume, and carried in `snapshot`. That is a design change
-;; to the persistence contract, not a condition swap, and it deserves its own
-;; pass rather than being smuggled in beside a latency fix.
-;;
-;; Stated here rather than in a note somewhere, because the next person to
-;; debug a stalled chain will land on this function.
+;; `:voted-view` is now part of the durable snapshot. The final signing gate
+;; rejects a spent view even after sync replaces the tip or restart evicts
+;; the in-memory vote cache. Every fresh vote also checks the pacemaker lock.
 
 (defn voted-view
   "The highest view this replica has voted in, or -1.
@@ -359,12 +345,9 @@
   the watermark a `resume` leaves behind: every height at or under it counts
   as voted whether or not the set still names it.
 
-  **The watermark only ever makes this answer MORE often.** That direction is
-  the safe one — refusing to vote costs liveness at a height already decided,
-  and voting twice at one height is equivocation, which is the one thing this
-  system slashes for. A resumed replica cannot legitimately need to vote at or
-  below the tip it resumed on: it voted for the block it adopted at each of
-  those heights, and every proposal it will see from now on is above them."
+  The height watermark is conservative after resume. It cannot replace
+  `:voted-view`: votes at one height in different views are legitimate when
+  the pacemaker's lock rule permits them."
   [state h]
   (or (<= h (:voted-below state -1))
       (contains? (:voted state) h)))
@@ -734,28 +717,9 @@
                                    (:inga.vote/sig mine)
                                    (assoc :sig (:inga.vote/sig mine)))}]]
 
-          ;; Voted, and no longer holding the vote. Cast it again.
-          ;;
-          ;; An evicted replica comes back with its BLOCKS and the heights it
-          ;; voted at — `replay` restores both — and with an empty `:votes`,
-          ;; because votes are memory. It then cannot re-cast, because it
-          ;; knows it already voted here, and cannot re-send, because it does
-          ;; not have the vote. A dead end, and it is invisible: the replica
-          ;; is not behind, holds the right tip, and reports nothing wrong.
-          ;;
-          ;; Deployed, all four replicas sat on the same tip at height 225
-          ;; with the same state root and exactly TWO votes each against a
-          ;; quorum of three, while the clock kept ticking. Every replica had
-          ;; voted; between them they could not produce three votes.
-          ;;
-          ;; Safe because it is the same block: `already-voted` says we voted
-          ;; at this HEIGHT, and a replica's chain IS what it voted for, so a
-          ;; proposal whose hash equals our tip is the block we voted for.
-          ;; Anything else still gets nothing, which is what stops this from
-          ;; being an equivocation.
-          (= (hf block) (hf (tip state)))
-          (cast-vote state block now)
-
+          ;; A snapshot preserves the spent view, not the signed block.
+          ;; Sync may have replaced the tip; without the cached vote there is
+          ;; nothing safe to resend in this view.
           :else [state []]))
 
       ;; Refused, and NOT adopted.
@@ -961,11 +925,16 @@
     :all))
 
 (defn- cast-vote
-  "Vote for `block` at the current view: record it locally and emit it.
+  "Vote for `block` at the current view after the spent-view and lock checks:
+  record it locally and emit it.
 
   Returns `[state' outbox]`. The local record is not an optimisation — see
   `fold-vote`."
   [state block now]
+  (if (or (<= (:view (:pm state)) (voted-view state))
+          (not (pm/safe-to-vote? (:pm state) block
+                                 #(ancestor? state %1 %2))))
+    [state []]
   (let [hf (:hash-fn state)
         view (:view (:pm state))
         bh (hf block)
@@ -1023,9 +992,9 @@
                                         ;; Equivocation is defined against it,
                                         ;; and `voted-view` is what a host must
                                         ;; make durable before the vote leaves.
-                                        (assoc :voted-view view))
+                                        (with-voted-view view))
                                     vote now)]
-        [state' (into [{:to (vote-to state block) :msg (assoc vote :type :vote)}] out)]))))
+        [state' (into [{:to (vote-to state block) :msg (assoc vote :type :vote)}] out)])))))
 
 (defn- adopt-own
   "A proposer adopts and votes for its own block.
@@ -1242,41 +1211,10 @@
              [])]))
 
 (defn- vote-on-tip
-  "Vote for the tip when this replica has not voted at that height.
+  "Resend a cached tip vote, or ask the central signing gate for a fresh vote.
 
-  Catching up adopts blocks without voting for them, and a block everybody
-  adopted and nobody voted for can never be certified — so the chain freezes
-  at exactly the height the replicas synced to. Four deployed validators sat
-  there with thousands of proposals received, a thousand sync-responses each,
-  and ZERO votes recorded for the tip: `blocked-by: no certificate for the
-  tip` on all four at once.
-
-  Voting for it is safe and is what a caught-up replica is for. `inga.sync`
-  already refused the segment unless every block in it carried a certificate
-  for its own parent with a quorum of verifying signatures — a block that
-  arrived that way has been agreed by more replicas than this one has heard
-  from directly.
-
-  ## Having voted at this height is not a reason to stay silent
-
-  `replay` records every height it folds as voted — correctly, because those
-  are blocks this replica adopted and voted for the first time round. But a
-  replica that REPLAYS to its tip holds no certificate for that tip:
-  `replay` recovers a certificate only from a block's `:justify`, and the
-  certificate for the tip travels in the block AFTER it, which does not exist
-  yet. So the tip is uncertified, the leader cannot propose on it, and this
-  function — written for exactly that situation — refused to vote because
-  `voted?` said yes.
-
-  Measured on the deployed devnet: all four replicas at height 282, view 267,
-  `blocked-by: no certificate for the tip`, `votes-for-tip: 0`, and
-  `sent-types {new-view 29, sync-response 87}`. Not one vote, forever.
-
-  Re-casting is safe for the same reason `handle-proposal` already re-casts:
-  `voted?` says we voted at this HEIGHT, and **a replica's chain IS what it
-  voted for**, so a vote for our own tip is the same vote we already cast.
-  This function never votes for anything except `(tip state)`, so nothing
-  else at that height can be voted for by accident."
+  A synced or replayed tip does not prove which block this witness signed.
+  Without a cached vote, the durable watermark must permit a later view."
   [state now]
   (let [t (tip state)
         h (:inga.block/height t)
@@ -1285,8 +1223,10 @@
     (cond
       (zero? h) [state []]
 
-      ;; Never voted here: the ordinary case.
-      (not (voted? state h)) (cast-vote state t now)
+      ;; A new view permits a fresh vote even when this height was voted in
+      ;; an earlier view. Keeping only the cached old-view vote can prevent
+      ;; synchronized replicas from collecting votes after recovery.
+      (> (:view (:pm state)) (voted-view state)) (cast-vote state t now)
 
       ;; Voted, and still holding the vote: re-send it rather than re-signing.
       mine
@@ -1299,8 +1239,7 @@
                                (:inga.vote/sig mine)
                                (assoc :sig (:inga.vote/sig mine)))}]]
 
-      ;; Voted, and no longer holding the vote — a restart. Cast it again for
-      ;; the block we hold.
+      ;; Without a cached vote, cast-vote must enforce the durable watermark.
       :else (cast-vote state t now))))
 
 (defn- handle-sync-response
@@ -1743,10 +1682,9 @@
   ## What it drops, and why that is safe
 
   `replay` restores `:voted` by folding every block. A bounded snapshot cannot
-  — that is the whole point — so it leaves a WATERMARK instead: `:voted-below`
-  = the tip height. `voted?` then refuses at every height at or under it,
-  which refuses at least as much as the folded set did. Refusing more costs a
-  vote at a height already decided; refusing less is equivocation.
+  — that is the whole point — so it leaves a height watermark instead:
+  `:voted-below` = the tip height. `voted?` answers true at every height at or
+  under it. The separate durable `:voted-view` is the signing fence.
 
   `:votes`, `:new-views` and `:first-vote` are dropped outright. They are
   per-view working state, and the one place `:votes` is load-bearing across a
