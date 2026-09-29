@@ -141,7 +141,7 @@
     (is (string? sha)
         (str "deps.edn :test pins no compiler under io.github.kotoba-lang/amu"
              " (nor the historical .../compiler). The compiler repo is `amu`"
-             " — see CLAUDE.md's note that the old name survives only as a"
+             " — see AGENTS.md's note that the old name survives only as a"
              " GitHub redirect."))
     (is (re-matches #"[0-9a-f]{40}" (str sha))
         (str "the compiler pin must be a full 40-character commit sha, got " (pr-str sha)))))
