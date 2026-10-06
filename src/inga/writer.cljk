@@ -34,7 +34,7 @@
   the record. Rejecting such records before voting would also keep them out
   of blocks; that needs a validation seam in `inga.replica`, which this does
   not add."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def record-version "inga.ref-record/v1")
 
