@@ -162,6 +162,40 @@
       (is (= [:sync-request] (mapv #(:type (:msg %)) out)))
       (is (= 0 (r/height s')) "and did not adopt it"))))
 
+(deftest a-proposal-whose-parent-is-known-but-above-the-tip-asks-for-the-gap
+  (testing "a replica that restarted behind the chain learns the next blocks
+            from proposals; after the first, every proposal has a parent it
+            holds, so 'parent unknown' never fires again and the blocks between
+            its tip and that parent never arrive (v5 joseph, v4 xavier)"
+    (let [s (get (net) :w2)
+          qc5 {:inga.qc/block-hash "h:four" :inga.qc/height 4
+               :inga.qc/witnesses #{:w1 :w3 :w4} :inga.qc/vote-count 3}
+          b5 (c/make-block {:height 5 :parent-hash "h:four" :proposals []
+                            :proposer :w1 :ts 5 :justify qc5})
+          ;; the first proposal: parent unknown, so it asks -- and keeps b5
+          [s _] (r/on-message s {:type :proposal :block b5} 1000)
+          b6 (c/make-block {:height 6 :parent-hash (hash-fn b5) :proposals []
+                            :proposer :w2 :ts 6
+                            :justify {:inga.qc/block-hash (hash-fn b5)
+                                      :inga.qc/height 5
+                                      :inga.qc/witnesses #{:w1 :w3 :w4}
+                                      :inga.qc/vote-count 3}})
+          [s' out] (r/on-message s {:type :proposal :block b6} 1001)
+          asks (filter #(= :sync-request (:type (:msg %))) out)]
+      (is (= 0 (r/height s')) "the tip has not moved: 1..4 are still missing")
+      (is (= 1 (count asks)) "so it asks again, although b6's parent is known")
+      (is (= 1 (:from (:msg (first asks)))) "from just above its tip")
+      (is (<= 5 (:to (:msg (first asks)))) "up to at least the known parent"))))
+
+(deftest a-proposal-extending-the-tip-asks-for-nothing
+  (testing "the gap request must not fire on the ordinary path"
+    (let [s (get (net) :w2)
+          g (r/tip s)
+          b1 (c/make-block {:height 1 :parent-hash (hash-fn g) :proposals []
+                            :proposer :w1 :ts 1 :justify nil})
+          [_ out] (r/on-message s {:type :proposal :block b1} 1000)]
+      (is (empty? (filter #(= :sync-request (:type (:msg %))) out))))))
+
 (deftest a-block-that-does-not-extend-its-parent-is-refused
   (testing "naming a parent is not the same as carrying a certificate for it —
             the splice this check exists to stop"

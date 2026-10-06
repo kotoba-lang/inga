@@ -644,7 +644,45 @@
     (and (<= h final-height)
          (not= block-hash (committed-hash-at state h)))))
 
+(declare certified-sync-request handle-proposal*)
+
+(defn- gap-sync-request
+  "A sync request when `parent` is known but sits above this replica's tip.
+
+  `handle-proposal` asked for history only when a proposal's parent was
+  UNKNOWN. A replica that restarted behind the chain learns the next few
+  blocks from proposals, so after the first one every later proposal has a
+  parent it holds: the parent is in `:by-hash`, never on `:chain`, because
+  the blocks between the tip and it never arrived. Nothing asked again. The
+  replica kept voting -- its lock and view tracked the quorum -- while its
+  adopted chain stayed where the one bounded answer left it. Measured on the
+  v5 score chain (2026-10-06): joseph voted in view 427 with its lock at
+  height 358 and its chain at 278, for as long as it was watched; v4's w2
+  (xavier) showed the same counters after its 2026-09-28 restart, and v4
+  stopped that day.
+
+  Asks for the certified branch when it fits one response, else a bounded
+  window from the tip -- the same pair the new-view path uses."
+  [state parent block]
+  (let [tip-height (height state)
+        parent-height (:inga.block/height parent)
+        qc (:inga.block/justify block)]
+    (when (and (integer? parent-height) (> parent-height tip-height)
+               (not= ((:hash-fn state) parent) ((:hash-fn state) (tip state))))
+      (or (when (and qc (= parent-height (:inga.qc/height qc)))
+            (certified-sync-request state qc))
+          (when-let [r (sync/request tip-height parent-height sync/default-params)]
+            (assoc r :type :sync-request :witness (:witness state)))))))
+
 (defn- handle-proposal
+  [state {:keys [block] :as msg} now]
+  (let [state (remember-block state block)
+        parent (get (:by-hash state) (:inga.block/parent-hash block))
+        ask (when parent (gap-sync-request state parent block))
+        [state' out] (handle-proposal* state msg now)]
+    [state' (cond-> (vec out) ask (conj {:to :all :msg ask}))]))
+
+(defn- handle-proposal*
   [state {:keys [block]} now]
   (let [state (remember-block state block)
         hf (:hash-fn state)
