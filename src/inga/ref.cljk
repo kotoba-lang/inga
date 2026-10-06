@@ -217,8 +217,12 @@
    (reduce (fn [acc r]
              (let [ref-name (get r "ref") s (get r "seq")]
                (cond
-                 (not (admit? r)) acc                    ; not a writer of this ref
+                 ;; Occupancy first: a record at a sequence that already has a
+                 ;; winner cannot change the projection, so it is not verified.
+                 ;; Otherwise refused records, which stay in blocks, could force
+                 ;; every projection to repeat curve checks without bound.
                  (get-in acc [ref-name s]) acc           ; someone got here first
+                 (not (admit? r)) acc                    ; not a writer of this ref
                  :else (assoc-in acc [ref-name s] r))))
            {}
            records)))

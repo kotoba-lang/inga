@@ -18,9 +18,10 @@
   nothing for any other.
 
   A record on a covered ref must carry `writer` (a did:key in the set) and
-  `sig`, a signature by that writer over `signing-text`. The text covers
-  `ref`, `seq`, `cid` and `prev`. A signed record therefore cannot be replayed
-  at another sequence or onto another ref.
+  `sig`, a signature by that writer over `signing-text`. The text covers the
+  chain id and every field a record may carry, so a signed record cannot be
+  replayed at another sequence, onto another ref, onto another chain, or
+  with any field changed. A record with any other field is refused.
 
   `verify-fn` is injected, `(verify-fn writer text sig) -> boolean`, for the
   same reason `inga.attest` injects its curve: this namespace has no crypto
@@ -36,43 +37,69 @@
   not add."
   (:require [kotoba.lang.text :as str]))
 
-(def record-version "inga.ref-record/v1")
+(def record-version "inga.ref-record/v2")
+
+(def signed-fields
+  "Every field a covered record may carry besides `writer` and `sig`. All of
+  them are signed, so a copy of a signed record with any field changed does
+  not verify (v1 signed only ref/seq/cid/prev, and a copy with a different
+  `v` or `height` could be ordered first and win)."
+  ["ref" "seq" "cid" "prev" "v" "height"])
 
 (defn signing-text
-  "The exact text a writer signs. Newline-separated, with the version first,
-  so no field can run into the next one."
-  [record]
-  (str "inga/ref-record/v1\n"
-       (get record "ref") "\n"
-       (get record "seq") "\n"
-       (get record "cid") "\n"
-       (or (get record "prev") "")))
+  "The exact text a writer signs: the version, the chain id (so a record
+  signed for one chain cannot be replayed on another), then every signed
+  field as `name=value`, newline-separated, absent as empty."
+  [chain-id record]
+  (apply str "inga/ref-record/v2\n" "chain=" chain-id "\n"
+         (for [f signed-fields] (str f "=" (let [v (get record f)] (if (nil? v) "" v)) "\n"))))
+
+(defn- entry
+  "A policy value is a writer set, or {\"writers\" #{...} \"from_seq\" n}.
+  `from_seq` grandfathers history: records below it were committed before the
+  policy existed and are admitted as they are, so enabling a policy on a ref
+  that already has unsigned history does not erase its head."
+  [v]
+  (if (set? v) {:writers v :from-seq 0} {:writers (get v "writers") :from-seq (or (get v "from_seq") 0)}))
 
 (defn writers-for
-  "The writer set covering `ref-name`, or nil when the policy leaves it
-  unrestricted."
+  "The policy entry ({:writers :from-seq}) covering `ref-name`, or nil when
+  the policy leaves it unrestricted."
   [policy ref-name]
-  (or (get policy ref-name)
-      (some->> (keys policy)
-               (filter #(and (str/ends-with? % "/") (str/starts-with? ref-name %)))
-               (sort-by count >)
-               first
-               (get policy))))
+  (when (string? ref-name)
+    (some-> (or (get policy ref-name)
+                (some->> (keys policy)
+                         (filter #(and (str/ends-with? % "/") (str/starts-with? ref-name %)))
+                         (sort-by count >)
+                         first
+                         (get policy)))
+            entry)))
 
 (defn refusal
-  "nil when `record` may become state under `policy`, else a keyword saying
-  why not."
-  [policy verify-fn record]
-  (when-let [allowed (writers-for policy (get record "ref"))]
-    (let [writer (get record "writer") sig (get record "sig")]
-      (cond
-        (not (and (string? writer) (string? sig))) :unsigned
-        (not (contains? allowed writer)) :writer-not-allowed
-        (not (try (verify-fn writer (signing-text record) sig) (catch #?(:clj Exception :cljs :default) _ false)))
-        :bad-signature
-        :else nil))))
+  "nil when `record` may become state under `policy` on chain `chain-id`,
+  else a keyword saying why not. Total: a malformed record is refused, never
+  thrown on, because refused records stay in committed blocks and one bad
+  record must not stop every reader from projecting."
+  [policy chain-id verify-fn record]
+  (let [ref-name (get record "ref")]
+    (if-not (string? ref-name)
+      (when (seq policy) :malformed)
+      (when-let [{:keys [writers from-seq]} (writers-for policy ref-name)]
+        (let [seq' (get record "seq") writer (get record "writer") sig (get record "sig")]
+          (cond
+            (not (integer? seq')) :malformed
+            (< seq' from-seq) nil
+            (not (every? (set (concat signed-fields ["writer" "sig"])) (keys record))) :unexpected-field
+            (not (and (string? writer) (string? sig))) :unsigned
+            (not (contains? writers writer)) :writer-not-allowed
+            ;; Literally true: a verifier that returns a promise (WebCrypto) is
+            ;; truthy before it resolves, and must not admit everything.
+            (not (true? (try (verify-fn writer (signing-text chain-id record) sig)
+                             (catch #?(:clj Exception :cljs :default) _ false))))
+            :bad-signature
+            :else nil))))))
 
 (defn admit
   "The predicate `inga.ref/project` filters committed records with."
-  [policy verify-fn]
-  (fn [record] (nil? (refusal policy verify-fn record))))
+  [policy chain-id verify-fn]
+  (fn [record] (nil? (refusal policy chain-id verify-fn record))))
