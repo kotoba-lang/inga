@@ -644,7 +644,7 @@
     (and (<= h final-height)
          (not= block-hash (committed-hash-at state h)))))
 
-(declare certified-sync-request handle-proposal*)
+(declare handle-proposal*)
 
 (defn- gap-sync-request
   "A sync request when `parent` is known but sits above this replica's tip.
@@ -661,18 +661,23 @@
   (xavier) showed the same counters after its 2026-09-28 restart, and v4
   stopped that day.
 
-  Asks for the certified branch when it fits one response, else a bounded
-  window from the tip -- the same pair the new-view path uses."
+  Asks for a bounded window anchored on the tip, not for the certified
+  branch. The certified request names the NEWEST certificate as its target,
+  and that block is not committed yet: a peer's archive serves committed
+  blocks only, its live tail is a few blocks deep, so neither can end a
+  segment at that target and the request went unanswered on every proposal
+  (v5, 2026-10-06: joseph asked from 277 to 463 while the archive ended at
+  461 and the tail began at 456). A window from tip+1 is what the archive can
+  answer up to its committed height; the last blocks arrive on the next
+  proposal, inside the live tail. `inga.sync` still checks every certificate
+  inside the segment and that it attaches to the tip."
   [state parent block]
   (let [tip-height (height state)
-        parent-height (:inga.block/height parent)
-        qc (:inga.block/justify block)]
+        parent-height (:inga.block/height parent)]
     (when (and (integer? parent-height) (> parent-height tip-height)
                (not= ((:hash-fn state) parent) ((:hash-fn state) (tip state))))
-      (or (when (and qc (= parent-height (:inga.qc/height qc)))
-            (certified-sync-request state qc))
-          (when-let [r (sync/request tip-height parent-height sync/default-params)]
-            (assoc r :type :sync-request :witness (:witness state)))))))
+      (when-let [r (sync/request tip-height parent-height sync/default-params)]
+        (assoc r :type :sync-request :witness (:witness state))))))
 
 (defn- handle-proposal
   [state {:keys [block] :as msg} now]
