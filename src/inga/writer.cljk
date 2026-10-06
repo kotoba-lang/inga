@@ -1,0 +1,78 @@
+(ns inga.writer
+  "Who may write a ref. Opt-in per ref, checked where records become state.
+
+  `inga.ref/project` keeps the first committed record per `[ref seq]` and
+  never asks who wrote it. Without a policy, anyone who can reach a node's
+  submit path can take the next sequence of any ref, and the quorum will
+  certify it. Measured on the v5 score chain (2026-10-07): inga-node's
+  `/submit` requires only `ref` and `cid`.
+
+  A policy maps refs to the writers allowed on them:
+
+      {\"yataverse/lake\"   #{\"did:key:z6Mk…operator\"}
+       \"yataverse/graph/\" #{\"did:key:z6Mk…mirror\"}}
+
+  A key ending in `/` is a prefix. An exact key beats a prefix, and a longer
+  prefix beats a shorter one. A ref that no key covers is unrestricted. That
+  is what makes the policy opt-in, so turning it on for one ref changes
+  nothing for any other.
+
+  A record on a covered ref must carry `writer` (a did:key in the set) and
+  `sig`, a signature by that writer over `signing-text`. The text covers
+  `ref`, `seq`, `cid` and `prev`. A signed record therefore cannot be replayed
+  at another sequence or onto another ref.
+
+  `verify-fn` is injected, `(verify-fn writer text sig) -> boolean`, for the
+  same reason `inga.attest` injects its curve: this namespace has no crypto
+  dependency, and the curve lives at the edge.
+
+  Where it runs: `admit` is the predicate `inga.ref/project` filters with.
+  A record that fails it is still in the block (the quorum ordered it), but
+  it never becomes state. It cannot take a sequence, so the next authorized
+  record at that sequence wins. Every node and every reader that applies the
+  same policy derives the same head, because the check is a pure function of
+  the record. Rejecting such records before voting would also keep them out
+  of blocks; that needs a validation seam in `inga.replica`, which this does
+  not add."
+  (:require [clojure.string :as str]))
+
+(def record-version "inga.ref-record/v1")
+
+(defn signing-text
+  "The exact text a writer signs. Newline-separated, with the version first,
+  so no field can run into the next one."
+  [record]
+  (str "inga/ref-record/v1\n"
+       (get record "ref") "\n"
+       (get record "seq") "\n"
+       (get record "cid") "\n"
+       (or (get record "prev") "")))
+
+(defn writers-for
+  "The writer set covering `ref-name`, or nil when the policy leaves it
+  unrestricted."
+  [policy ref-name]
+  (or (get policy ref-name)
+      (some->> (keys policy)
+               (filter #(and (str/ends-with? % "/") (str/starts-with? ref-name %)))
+               (sort-by count >)
+               first
+               (get policy))))
+
+(defn refusal
+  "nil when `record` may become state under `policy`, else a keyword saying
+  why not."
+  [policy verify-fn record]
+  (when-let [allowed (writers-for policy (get record "ref"))]
+    (let [writer (get record "writer") sig (get record "sig")]
+      (cond
+        (not (and (string? writer) (string? sig))) :unsigned
+        (not (contains? allowed writer)) :writer-not-allowed
+        (not (try (verify-fn writer (signing-text record) sig) (catch #?(:clj Exception :cljs :default) _ false)))
+        :bad-signature
+        :else nil))))
+
+(defn admit
+  "The predicate `inga.ref/project` filters committed records with."
+  [policy verify-fn]
+  (fn [record] (nil? (refusal policy verify-fn record))))

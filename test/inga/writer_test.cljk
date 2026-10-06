@@ -1,0 +1,56 @@
+(ns inga.writer-test
+  "Writer policy on refs. Signatures here are `writer|text` strings, not
+  crypto, for the reason ref-test gives: the curve is injected, and what these
+  tests check is which record becomes state."
+  (:require [kotoba.test :refer [deftest is testing]]
+            [inga.ref :as iref]
+            [inga.writer :as w]))
+
+(def op "did:key:z6MkOperator")
+(def mirror "did:key:z6MkMirror")
+(def outsider "did:key:z6MkOutsider")
+
+(def policy {"yataverse/lake" #{op}
+             "yataverse/graph/" #{mirror}})
+
+(defn- verify [writer text sig] (= sig (str writer "|" text)))
+
+(defn- signed [writer r] (assoc r "writer" writer "sig" (str writer "|" (w/signing-text r))))
+
+(def admit (w/admit policy verify))
+
+(deftest writers-are-found-by-exact-key-then-longest-prefix
+  (is (= #{op} (w/writers-for policy "yataverse/lake")))
+  (is (= #{mirror} (w/writers-for policy "yataverse/graph/bafyx")))
+  (is (= #{"did:key:z6MkNarrow"}
+         (w/writers-for (assoc policy "yataverse/graph/bafyx" #{"did:key:z6MkNarrow"}) "yataverse/graph/bafyx")))
+  (is (nil? (w/writers-for policy "isekai/scores")) "an uncovered ref is unrestricted")
+  (is (nil? (w/writers-for policy "yataverse/lakehouse")) "an exact key is not a prefix"))
+
+(deftest a-covered-ref-needs-an-allowed-writer-and-a-good-signature
+  (let [r {"ref" "yataverse/lake" "seq" 3 "cid" "bafyA" "prev" "bafyP"}]
+    (is (nil? (w/refusal policy verify (signed op r))))
+    (is (= :unsigned (w/refusal policy verify r)))
+    (is (= :writer-not-allowed (w/refusal policy verify (signed outsider r))))
+    (is (= :writer-not-allowed (w/refusal policy verify (signed mirror r)))
+        "the graph mirror's key does not write the lake")
+    (testing "the signature binds ref, seq, cid and prev"
+      (let [good (signed op r)]
+        (doseq [[k v] [["seq" 4] ["cid" "bafyB"] ["prev" "bafyQ"] ["ref" "yataverse/graph/bafyx"]]]
+          (is (some? (w/refusal policy verify (assoc good k v))) (str k " altered")))))
+    (testing "a throwing verifier refuses rather than admits"
+      (is (= :bad-signature (w/refusal policy (fn [& _] (throw (ex-info "boom" {}))) (signed op r)))))))
+
+(deftest an-uncovered-ref-is-admitted-unsigned
+  (is (nil? (w/refusal policy verify {"ref" "isekai/scores" "seq" 0 "cid" "bafyS"}))))
+
+(deftest a-refused-record-takes-no-sequence
+  (let [forged {"ref" "yataverse/lake" "seq" 0 "cid" "bafyForged"}
+        real (signed op {"ref" "yataverse/lake" "seq" 0 "cid" "bafyReal"})
+        next1 (signed op {"ref" "yataverse/lake" "seq" 1 "cid" "bafyNext" "prev" "bafyReal"})
+        proj (iref/project [forged (signed outsider forged) real next1] admit)]
+    (is (= "bafyReal" (get-in proj ["yataverse/lake" 0 "cid"]))
+        "the first ADMITTED record wins seq 0, though two refused ones came first")
+    (is (= "bafyNext" (get (iref/head-of proj "yataverse/lake") "cid")))
+    (testing "without a policy the forged record would have won, as before"
+      (is (= "bafyForged" (get-in (iref/project [forged real]) ["yataverse/lake" 0 "cid"]))))))
