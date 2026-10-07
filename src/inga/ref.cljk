@@ -207,15 +207,25 @@
 
   First-wins rather than last-wins is the entire compare-and-set. Last-wins
   would let a writer that lost the ordering overwrite the winner by simply
-  proposing again, which is the lost update this plane exists to prevent."
-  [records]
-  (reduce (fn [acc r]
-            (let [ref-name (get r "ref") s (get r "seq")]
-              (if (get-in acc [ref-name s])
-                acc                                   ; someone got here first
-                (assoc-in acc [ref-name s] r))))
-          {}
-          records))
+  proposing again, which is the lost update this plane exists to prevent.
+
+  With `admit?` (see `inga.writer/admit`), a record it refuses never becomes
+  state. It takes no sequence, so the first ADMITTED record at that sequence
+  wins. Without it, every record is admitted, as before."
+  ([records] (project records (constantly true)))
+  ([records admit?]
+   (reduce (fn [acc r]
+             (let [ref-name (get r "ref") s (get r "seq")]
+               (cond
+                 ;; Occupancy first: a record at a sequence that already has a
+                 ;; winner cannot change the projection, so it is not verified.
+                 ;; Otherwise refused records, which stay in blocks, could force
+                 ;; every projection to repeat curve checks without bound.
+                 (get-in acc [ref-name s]) acc           ; someone got here first
+                 (not (admit? r)) acc                    ; not a writer of this ref
+                 :else (assoc-in acc [ref-name s] r))))
+           {}
+           records)))
 
 (defn head-of
   "The highest CONTIGUOUS head for `ref-name` in a projection, or nil.
