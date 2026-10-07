@@ -1162,14 +1162,27 @@
 
 (defn- certified-sync-request
   "Ask for the whole certified uncommitted branch when it fits one bounded
-  response. Starting above the local tip cannot repair a fork below that tip."
+  response. Starting above the local tip cannot repair a fork below that tip.
+
+  A fork is any certified block that is not the block this replica's chain
+  holds at that height -- at the tip's height OR BELOW it. This compared only
+  against the tip, so a certified rival one block under an uncertified tip
+  was never asked for. Measured 2026-10-07 on isekai-score-20261006-v5: all
+  seven witnesses held 16154 -> e326 -> 7c9a while the quorum had certified a
+  different 16155 (50f5), their high-qc and lock. The tip could not be
+  certified (it extends what the lock forbids), so nobody proposed, and
+  nothing asked for 50f5. Committed height stood at 16154 for four hours.
+
+  The ordinary case -- the certified block IS the chain's block at that height,
+  the tip's own parent in chained HotStuff -- is not a fork and asks nothing."
   [state qc]
-  (let [to (:inga.qc/height qc)
+  (let [hf (:hash-fn state)
+        to (:inga.qc/height qc)
         from (max 1 (inc (committed-height state)))
         local-height (height state)
-        different? (and (= to local-height)
-                        (not= (:inga.qc/block-hash qc)
-                              ((:hash-fn state) (tip state))))]
+        local-at (some (fn [b] (when (= to (:inga.block/height b)) (hf b))) (:chain state))
+        different? (and (integer? to) (<= to local-height)
+                        (not= (:inga.qc/block-hash qc) local-at))]
     (when (and qc (integer? to)
                (or (> to local-height) different?)
                (<= from to)

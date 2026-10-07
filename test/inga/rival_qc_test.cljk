@@ -148,3 +148,59 @@
                                        :blocks [local]} 1000)]
     (is (= (hash-fn local) (hash-fn (r/tip after))))
     (is (= :wrong-certified-target (get-in after [:last-sync :reason])))))
+
+;; Measured 2026-10-07 on isekai-score-20261006-v5, stalled at committed 16154
+;; for four hours with all seven witnesses connected: every replica's chain
+;; ran 16154 -> e326 (16155) -> 7c9a (16156), while the quorum had certified a
+;; DIFFERENT 16155 (50f5), held as high-qc and lock by all seven. The tip was
+;; uncertified, so nobody could propose; the certified block sat one BELOW the
+;; tip, and the hash-targeted request only fired for a rival at the tip's own
+;; height or above. Nothing ever asked for 50f5, so nothing ever moved.
+(deftest a-certified-rival-below-the-tip-is-requested-and-adopted
+  (let [opts (opts :w1)
+        initial (r/replica opts)
+        genesis (r/tip initial)
+        local (certified-child genesis 1)
+        local-child (certified-child local 2)
+        rival (update local :inga.block/ts inc)
+        target (hash-fn rival)
+        qc (genuine-cert target 1)
+        requester (-> initial
+                      (assoc :chain [genesis local local-child]
+                             :by-hash {(hash-fn genesis) genesis
+                                       (hash-fn local) local
+                                       (hash-fn local-child) local-child}))
+        responder (-> initial
+                      (assoc :chain [genesis rival]
+                             :by-hash {(hash-fn genesis) genesis target rival}
+                             :qcs {target qc})
+                      (assoc-in [:pm :high-qc] qc))
+        [requester requests] (r/on-message requester (nv :w2 7 qc) 1000)
+        request (:msg (first (filter #(= :sync-request (:type (:msg %))) requests)))
+        [decoded-request _] (wire/decode (wire/encode request))
+        [_ responses] (r/on-message responder decoded-request 1001)
+        response (:msg (first responses))
+        [decoded-response _] (wire/decode (wire/encode response))
+        [recovered _] (r/on-message requester decoded-response 1002)]
+    (is (= {:type :sync-request :witness "w1" :from 1 :to 1 :target-hash target} request)
+        "a certified block below the tip that differs from the chain there is asked for by hash")
+    (is (= [rival] (:blocks response)))
+    (is (= target (hash-fn (r/tip recovered)))
+        "the uncertified suffix above the fork is discarded for the certified branch")
+    (is (not= :no-certificate-for-the-tip (get-in recovered [:propose-refusal :reason])))))
+
+(deftest a-certified-parent-of-the-tip-asks-for-nothing
+  (let [opts (opts :w1)
+        initial (r/replica opts)
+        genesis (r/tip initial)
+        local (certified-child genesis 1)
+        local-child (certified-child local 2)
+        qc (genuine-cert (hash-fn local) 1)
+        requester (-> initial
+                      (assoc :chain [genesis local local-child]
+                             :by-hash {(hash-fn genesis) genesis
+                                       (hash-fn local) local
+                                       (hash-fn local-child) local-child}))
+        [_ requests] (r/on-message requester (nv :w2 7 qc) 1000)]
+    (is (empty? (filter #(:target-hash (:msg %)) requests))
+        "the ordinary case — the tip's own parent is the certified block — is not a fork")))
