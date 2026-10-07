@@ -687,15 +687,16 @@
         [state' out] (handle-proposal* state msg now)]
     [state' (cond-> (vec out) ask (conj {:to :all :msg ask}))]))
 
-(defn- past-certificate-view
-  "Leave the view a certificate's votes were cast in.
+(defn- past-spent-view
+  "Leave the view this replica has already voted in, once it holds a
+  certificate that makes a new vote useful.
 
   `pm/on-progress` anchors the view to the certified block's ROUND, which is
   right while every block is certified in the view it was proposed in. It is
   not right after one timeout. Then `vote-on-tip` re-votes for the tip in the
   NEXT view, those votes certify it, and the counter lands on round + 1 — the
-  very view the replicas just spent. The next proposal carries that round, every
-  receiver answers `:already-voted-in-this-view`, and the only way on is another
+  very view the replica just spent. The next proposal carries that round, the
+  replica answers `:already-voted-in-this-view`, and the only way on is another
   timeout, which re-votes the tip in the next view again. One timeout puts the
   chain in a loop of one base timeout per block that it never leaves.
 
@@ -703,17 +704,62 @@
   machine: p50 1,020 ms per block, every block certified by tip re-votes one
   view late, every proposal refused `:already-voted-in-this-view`.
 
-  HotStuff's rule is that a QC formed in view v moves its holder to v + 1. The
-  QC's view is carried in the chain (each block's justify), so this is still a
-  counter every replica derives from the same blocks."
-  [pmst qc]
-  (pm/enter-at-least pmst (inc (pm/qc-view qc))))
+  ## Why the target is local
+
+  HotStuff moves a replica to `qc-view + 1`, and the first version of this did
+  that. But a certificate's view is the MAX of its votes' views, and a vote's
+  view is whatever its signer chose: one Byzantine witness signing a vote at
+  view 2^53 pushed every honest replica there, where `inc` stops moving and
+  `voted-view` pins the replica forever. The only number that has to be
+  passed is this replica's own spent view, and it needs nobody's word for it."
+  [state]
+  (update state :pm pm/enter-at-least (inc (voted-view state))))
+
+(defn- absorb-justify
+  "Fold the certificate a proposal carries for its parent, before deciding
+  whether to vote for it.
+
+  A replica that did not fold the quorum itself — votes routed to the leader,
+  or one vote lost — learns the parent's certificate only from the next
+  proposal. Without this it stays in its spent view and refuses the proposal
+  that would have told it to move: the same one-timeout-per-block loop, for
+  that replica alone.
+
+  Verified exactly as a new-view's high QC is (admitted witnesses, a quorum of
+  verifying signatures). One that does not verify is ignored rather than
+  refused: every check below still runs, so this can only let a replica vote
+  sooner, never vote for something it would otherwise refuse."
+  [state parent block now]
+  (let [hf (:hash-fn state)
+        j (:inga.block/justify block)
+        parent-hash (hf parent)
+        verify (:verify-fn state)
+        held? (contains? (:qcs state) parent-hash)]
+    (cond
+      held? (past-spent-view state)
+
+      (and j (= parent-hash (:inga.qc/block-hash j))
+           (pos? (:inga.qc/height j 0))
+           (or (nil? verify)
+               (nil? (att/verify-certificate j (:chain-id state) (:quorum state) verify
+                                             (wire/admits (:witnesses state))))))
+      (-> state
+          (assoc-in [:qcs parent-hash] (assoc j :inga.qc/origin :justify))
+          (update :pm pm/on-qc j)
+          (update :pm pm/on-progress (:inga.block/round parent 0) now (:params state))
+          past-spent-view
+          absorb-commits)
+
+      :else state)))
 
 (defn- handle-proposal*
   [state {:keys [block]} now]
   (let [state (remember-block state block)
         hf (:hash-fn state)
         parent (get (:by-hash state) (:inga.block/parent-hash block))
+        state (cond-> state
+                (and parent (c/direct-extends? hf parent block))
+                (absorb-justify parent block now))
         h (:inga.block/height block)]
     (cond
       (conflicts-with-commit? state h (hf block))
@@ -965,7 +1011,7 @@
                           (update :pm pm/on-progress
                                   (:inga.block/round (get (:by-hash state) block-hash) 0)
                                   now (:params state))
-                          (update :pm past-certificate-view cert)
+                          past-spent-view
                           absorb-commits)]
             (propose state now))
           [state []]))
