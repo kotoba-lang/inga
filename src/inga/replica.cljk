@@ -687,6 +687,28 @@
         [state' out] (handle-proposal* state msg now)]
     [state' (cond-> (vec out) ask (conj {:to :all :msg ask}))]))
 
+(defn- past-certificate-view
+  "Leave the view a certificate's votes were cast in.
+
+  `pm/on-progress` anchors the view to the certified block's ROUND, which is
+  right while every block is certified in the view it was proposed in. It is
+  not right after one timeout. Then `vote-on-tip` re-votes for the tip in the
+  NEXT view, those votes certify it, and the counter lands on round + 1 — the
+  very view the replicas just spent. The next proposal carries that round, every
+  receiver answers `:already-voted-in-this-view`, and the only way on is another
+  timeout, which re-votes the tip in the next view again. One timeout puts the
+  chain in a loop of one base timeout per block that it never leaves.
+
+  Measured on torihiki-node's standalone validator, four processes on one
+  machine: p50 1,020 ms per block, every block certified by tip re-votes one
+  view late, every proposal refused `:already-voted-in-this-view`.
+
+  HotStuff's rule is that a QC formed in view v moves its holder to v + 1. The
+  QC's view is carried in the chain (each block's justify), so this is still a
+  counter every replica derives from the same blocks."
+  [pmst qc]
+  (pm/enter-at-least pmst (inc (pm/qc-view qc))))
+
 (defn- handle-proposal*
   [state {:keys [block]} now]
   (let [state (remember-block state block)
@@ -943,6 +965,7 @@
                           (update :pm pm/on-progress
                                   (:inga.block/round (get (:by-hash state) block-hash) 0)
                                   now (:params state))
+                          (update :pm past-certificate-view cert)
                           absorb-commits)]
             (propose state now))
           [state []]))

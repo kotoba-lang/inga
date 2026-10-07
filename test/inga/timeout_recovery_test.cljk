@@ -1,0 +1,71 @@
+(ns inga.timeout-recovery-test
+  "One timeout must cost one timeout, not one per block forever after.
+
+  Four replicas over an in-process network with a few milliseconds of
+  delivery delay. The first 1,500 ms drop every message, so every replica
+  times out and the tip is later certified by `vote-on-tip` re-votes in the
+  next view. Before `past-certificate-view` that landed every replica on the
+  view it had just spent, the next proposal was refused
+  `:already-voted-in-this-view`, and the chain moved one block per base
+  timeout from then on (torihiki-node standalone, measured p50 1,020 ms)."
+  (:require [kotoba.test :refer [deftest is]]
+            [inga.replica :as r]
+            [inga.consensus :as c]
+            [inga.reservation-test :as fixture]))
+
+(defn- run
+  "Ticks every 10 ms, delivers each message 1-3 ms after it was sent (by send
+  order, so the run is deterministic), and drops everything sent before
+  `partition-until`. Returns the replicas at `until`."
+  [partition-until until]
+  (let [ws fixture/witnesses
+        states (atom (into {} (for [w ws] [w (r/replica (fixture/opts w))])))
+        q (atom [])
+        sent (atom 0)
+        clock (atom 0)
+        ship (fn [from out]
+               (doseq [{:keys [to msg]} out
+                       t (cond (or (nil? to) (= :all to)) (remove #{from} ws)
+                               (coll? to) to
+                               :else [to])]
+                 (let [n (swap! sent inc)]
+                   (when (>= @clock partition-until)
+                     (swap! q conj [(+ @clock 1 (mod n 3)) n t msg])))))
+        lead (c/leader-for ws 1)
+        [s0 out0] (r/start (get @states lead) 0)]
+    (swap! states assoc lead s0)
+    (ship lead out0)
+    (while (< @clock until)
+      (swap! clock inc)
+      (let [due (sort (filter #(<= (first %) @clock) @q))]
+        (swap! q (fn [v] (vec (remove #(<= (first %) @clock) v))))
+        (doseq [[_ _ t msg] due]
+          (let [[s' out] (r/on-message (get @states t) msg @clock)]
+            (swap! states assoc t s')
+            (ship t out))))
+      (when (zero? (mod @clock 10))
+        (doseq [w ws]
+          (let [[s' out] (r/on-tick (get @states w) @clock)]
+            (swap! states assoc w s')
+            (ship w out)))))
+    @states))
+
+(deftest a-timeout-does-not-leave-the-chain-one-timeout-per-block
+  (let [at-heal (run 1500 1500)
+        later (run 1500 4500)
+        h0 (apply min (map r/height (vals at-heal)))
+        h1 (apply min (map r/height (vals later)))]
+    ;; 3,000 ms after the partition heals. One block per base timeout would be
+    ;; three; a leader proposes at most once per 100 ms block interval and the
+    ;; four rotate, so a healthy chain makes well over a hundred.
+    (is (> (- h1 h0) 60)
+        (str "only " (- h1 h0) " blocks in 3 s after one timeout"))))
+
+(deftest replicas-agree-after-recovering
+  (let [states (run 1500 4500)
+        h (apply min (map r/height (vals states)))
+        at (fn [s] (some #(when (= h (:inga.block/height %)) ((:hash-fn s) %))
+                         (:chain s)))]
+    (is (pos? h))
+    (is (apply = (map at (vals states))) "every replica holds the same block at the common height")
+    (is (every? empty? (map :equivocations (vals states))))))
