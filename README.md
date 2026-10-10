@@ -978,3 +978,14 @@ A quorum that equivocates can certify two complete alternate branches; segment
 CIDs detect substitution within a chosen chain but cannot make that quorum
 honest. Validator rotation, holder/intent authentication, receiver fencing and
 exactly-once external consumption remain outside this proof.
+
+## Target-neutral and distributed stack architecture
+
+Owns ordered state/head and consensus contracts for declared domains. Keeps deterministic transition/metering separate from transport, placement and external Ethereum/FEVM settlement. Shared assets, policy governance and shared heads declare required finality; validation or DHT replication alone cannot satisfy it. Actual network/quorum/crypto evidence is separate from pure contract checks.
+
+See the [owner integration guide and dependency direction](docs/stack-architecture.md),
+[composition metadata](spec/stack-integration.edn), and
+[whole-stack refactor procedure](https://github.com/kotoba-lang/kotoba-lang/blob/main/docs/stack-refactor-procedure.md).
+The direction is adopted; runtime contract migration and qualification remain
+explicit, separately verified work. Tier labels are responsibility axes, not
+a single dependency ranking.
