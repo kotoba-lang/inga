@@ -89,7 +89,7 @@
                       ;; advancing means migrating the cores and regenerating.
                       io.github.kotoba-lang/amu
                       {:git/url "https://github.com/kotoba-lang/amu.git"
-                       :git/sha "806f5cef7d5bc11ad8ec8514ad6121efc73be6c7"}}
+                       :git/sha "09f4dcddedc088594ced1319c2d0d45ac93a86a4"}}
          :main-opts ["-m" "cognitect.test-runner"]}
   ;; Rebuild `kotoba/*.wasm` and their provenance records from `kotoba/*.kotoba`.
   ;; Combine with :test, which is where the compiler lives:
