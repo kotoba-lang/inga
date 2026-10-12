@@ -270,7 +270,7 @@ one, and it is not a dependency-count objection. `quorum.kotoba`'s own header
 states the stake: two implementations disagreeing means two replicas commit
 different state. Delegating to a versioned interpreter does not remove the
 second implementation — it replaces "inga's `.cljc` twin, which ships with inga
-at inga's own pin" with "whatever `kotoba-kir` each replica happens to have",
+at inga's own pin" with "whatever `osaho` (formerly `kotoba-kir`) each replica happens to have",
 and the substitute is worse in the way that matters: inga cannot see it, cannot
 hold every replica to it, and cannot test both its runtimes without shipping
 both. The hazard is not hypothetical. Measured on `kotoba-lang/kura` the same
