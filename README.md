@@ -864,6 +864,30 @@ compare it with `inga.prefix/verify` using real Ed25519 certificates, reject
 gaps and tampering, and cross the 8192-block boundary with a cheap synthetic
 signature seam. The latter checks scaling and boundaries, not cryptography.
 
+### Challenge-bound current-ref observations
+
+`inga.current-ref-read/signed-read` and `verify-quorum` define a separate
+current-read evidence layer. A witness signs its own `(ref, head-seq,
+head-cid)` observation together with the chain ID, witness ID, caller's
+unpredictable challenge, and observation time. The canonical payload is
+domain-separated as `inga/current-ref-read/v1`; responses from a different
+chain, ref, challenge, witness set, or freshness window do not count.
+
+The client supplies the trusted witness IDs, quorum rule, signature verifier,
+challenge, clock, and maximum age. It receives `:verified` only when distinct
+configured witnesses sign the same current head for that challenge. Conflicting
+reads without a quorum, stale responses, replayed challenges, invalid
+signatures, duplicate-witness equivocation, and an absent quorum remain
+unresolved or rejected. The `:expires-at` in the normalized proof is derived
+from the earliest accepted observation and the caller's freshness policy.
+
+This proves a quorum observation of one current ref value. It does not prove
+that the event is finalized, nor that no later write occurs after the read.
+Consumers must still verify the exact event's commitment/finality evidence,
+and bind the signed observation to that exact ref and event. The pure protocol
+and verifier do not imply that a witness HTTP endpoint, trusted chain profile,
+or production validator set is deployed.
+
 ### Segmented complete-prefix candidate
 
 `inga.segmented-prefix/verify-acquisition` is an additive, pure candidate API.
