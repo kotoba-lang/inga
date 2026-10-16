@@ -19,6 +19,7 @@
   "src/inga/chain.cljk" ".cljc"
   "src/inga/commitment.cljk" ".cljc"
   "src/inga/consensus.cljk" ".cljc"
+  "src/inga/current_ref_read.cljk" ".cljc"
   "src/inga/fuel.cljk" ".cljc"
   "src/inga/head.cljk" ".cljc"
   "src/inga/kotoba_order.cljk" ".cljc"
@@ -41,6 +42,7 @@
   "test/inga/attest_test.cljk" ".cljc"
   "test/inga/chain_test.cljk" ".cljc"
   "test/inga/commitment_test.cljk" ".cljc"
+  "test/inga/current_ref_read_test.cljk" ".cljc"
   "test/inga/consensus_test.cljk" ".cljc"
   "test/inga/departure_test.cljk" ".cljc"
   "test/inga/fuel_kotoba_test.cljk" ".cljs"
@@ -73,6 +75,7 @@
   "script/test-reservation.cljk" ".cljs"
   "src/inga/segmented_prefix.cljk" ".cljc"
   "test/inga/segmented_prefix_test.cljk" ".cljs"
+  "script/test-current-ref-read.cljk" ".cljs"
   "test/inga/vote_watermark_test.cljk" ".cljs"
   "script/test-vote-watermark.cljk" ".cljs"
  }}
