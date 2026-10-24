@@ -43,3 +43,16 @@ the tested executable. OpenSSL and Python hashlib generate independent
 public test fixtures; no production keys or services are used. This is not
 canonical project linkage, whole Inga migration, artifact admission, or a
 native node/replica deployment. Existing runtime selection is unchanged.
+
+## Canonical native module linkage (2026-10-24)
+
+The same 204-assertion closure now also passes per-module checking and native
+machine-code linkage, followed by Linux loaderless packing. The test module
+has moved to `test/native/inga/native_prefix_gate.kotoba` so normal namespace
+resolution can import it. Neither implementation bodies nor symbol names are
+rewritten. Record/vector calls cross checked interfaces. A stale source hash
+and a private import are refused. See the new
+[native-linked receipt](evidence/awai81-native-linked-20261024/receipt.json).
+The preceding source-unity evidence remains the historical baseline. Live
+replicas, durable signing/checkpoints, crash recovery and production finality
+remain unqualified.
