@@ -1,0 +1,30 @@
+;; Bounded ASCII request/reply over an explicitly granted native TCP listener.
+;; One connection carries one newline-terminated ASCII request. No signing or authority is
+;; supplied by the router. Partial/time-limited input is refused before act.
+(ns inga.native-transport
+ (:require [inga.native-wire :as w] [inga.native-prefix :as p]))
+(defn listen [address :string] :string (typed-cap-call :net/listen :string :string address))
+(defn accept [listener :string] :string
+ (typed-cap-call :net/accept :string :string (string-concat listener " 1000")))
+(defn close [connection :string] :string (typed-cap-call :net/write :string :string connection))
+(defn receive [connection :string] :string
+ (loop [reads 0 out ""]
+  (if (= reads 256) "rejected:transport-bound"
+   (let [part (typed-cap-call :net/read :string :string (string-concat connection " 16384 1000"))]
+    (cond (= part "") "rejected:transport-incomplete"
+          (or (= part "timeout") (= part "reset")) "rejected:transport-incomplete"
+          (> (+ (string-length out) (string-length part)) 8388608) "rejected:transport-bound"
+           :else (let [joined (string-concat out part) length (string-length joined)]
+                  (if (and (>= length 2) (= (string-substring joined (- length 2) length) "0a"))
+                   (let [data (string-substring joined 0 (- length 2))]
+                    (if (w/ascii-hex? data)
+                     (let [text (w/text data)] (if (= (p/fields text 10) 1) text "rejected:transport-encoding"))
+                     "rejected:transport-encoding"))
+                   (recur (+ reads 1) joined))))))))
+(defn reply [connection :string response :string] :bool
+ (loop [offset 0]
+  (if (= offset (string-length response)) true
+   (let [remaining (- (string-length response) offset) count (if (> remaining 8192) 8192 remaining)
+         part (string-substring response offset (+ offset count))
+         sent (typed-cap-call :net/write :string :string (w/join connection " " (w/ascii-hex part)))]
+    (and (= sent (str count)) (recur (+ offset count)))))))

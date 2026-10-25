@@ -1,0 +1,24 @@
+(ns inga.native-live-gate
+ (:require [inga.native-prefix :as n] [inga.native-live-fixture :as f])
+ (:export [main]))
+(defn main [] :i64
+ (let [chain (f/chain) genesis (f/genesis) validators (f/validators) prefix (f/prefix)
+       anchor (n/field prefix 10 0) first (n/field prefix 10 1) second (n/field prefix 10 2)
+       tip (n/field prefix 10 3) certificate (n/field second 124 6)
+       vote (n/field (n/field certificate 58 2) 59 0)]
+  (+ (if (n/live-context? chain genesis validators 3) 1 0)
+     (if (not (n/live-context? chain genesis validators 2)) 1 0)
+     (if (= (n/live-verify-chain chain genesis validators 3 anchor) 0) 1 0)
+     (if (= (n/live-verify-chain chain genesis validators 3 prefix) 3) 1 0)
+     (if (= (n/live-verify-certified-chain chain genesis validators 3 prefix (f/tip)) 3) 1 0)
+     (if (n/live-certificate? chain validators 3 first certificate) 1 0)
+     (if (not (n/live-certificate? chain validators 2 first certificate)) 1 0)
+     (if (n/live-vote-valid? chain validators first vote) 1 0)
+     (if (not (n/live-vote-valid? "other-chain" validators first vote)) 1 0)
+     (if (not (n/live-vote-valid? chain validators second vote)) 1 0)
+     (if (not (n/live-certificate? chain validators 3 tip certificate)) 1 0)
+     (if (= (n/live-verify-certified-chain chain genesis validators 3 prefix certificate) -7) 1 0)
+     (if (= (n/verify-prefix chain genesis validators 3 (f/mixed-prefix) (f/mixed-tip)) 1) 1 0)
+     (if (= (n/live-verify-certified-chain chain genesis validators 3 (f/mixed-prefix) (f/mixed-tip)) -6) 1 0)
+     (if (not (n/live-certificate? chain validators 3 first
+                (n/field (n/field (f/mixed-prefix) 10 2) 124 6))) 1 0))))

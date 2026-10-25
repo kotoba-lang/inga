@@ -1,0 +1,19 @@
+KSL1
+entry /work/native-project/inga-test/inga/native_actor.kotoba
+root /work/native-project/src
+root /work/native-project/test
+root /work/native-project/providers
+root /work/native-project/inga
+root /work/native-project/inga-test
+file 14d2f20406202eea6cf9db669d0d90ff58679d326a85750f7e861d40ba2e7df6 /work/native-project/inga-test/inga/native_actor.kotoba
+file 1aa8b9a05cebb943942458e0291061fb099edc9f749654f975fc00fe867b2008 /work/native-project/inga-test/inga/native_live_test_keys.kotoba
+file 5b9b056f70362be50d65a9f9988ad70b24ea73645acb4f2e55f25fb2531b760c /work/native-project/inga/inga/native_io.kotoba
+file 960395839b3cd6a2305b84157924078c8a8e722ec206229525d9fc43b5867cf7 /work/native-project/inga/inga/native_live_context.kotoba
+file c18e06ebd2d6dab5fac04158401a08b722aed0fe9520084a054315ee5e645c64 /work/native-project/inga/inga/native_prefix.kotoba
+file e97f9e8604fbe2abbf7ef17873b2ed4008dc3370c3c61644cf9c8fa8b16af2a5 /work/native-project/inga/inga/native_replica.kotoba
+file 6499a1ca24365a621bfeb81fe28107d2fa63e395e6d8f53248784dc9024ea6b3 /work/native-project/inga/inga/native_transport.kotoba
+file 9665dfeaa380c3fd8c7c82b25fe5c31ce88b5d4bb8d562744c673fcfc0fff922 /work/native-project/inga/inga/native_view_change.kotoba
+file 29b16643f5c9cf6e15e8329f9c46b30f3e430f9b9e85ed782e0428c02f8d9f4f /work/native-project/inga/inga/native_vote_store.kotoba
+file 2a3ddfed66eadca555bc16e366c27f569d9f0bcedb99fb4842a5b01de166daa4 /work/native-project/inga/inga/native_wire.kotoba
+file 47c086f3d93ad4f6da047bbf3b9250f7e4fbc7539ec1a0077abb2d82ceb3dc14 /work/native-project/providers/ed25519/selfhost.kotoba
+file 2c59ef55bc2b527c1aac723c0fee896eba75ee82fecd212a2858782beadc6888 /work/native-project/providers/sha2/core.kotoba

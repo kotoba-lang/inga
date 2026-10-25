@@ -1,0 +1,43 @@
+;; Process/crash harness over the exact production intent and I/O adapter.
+(ns inga.native-vote-store-driver
+ (:require [inga.native-vote-store :as s] [inga.native-replica :as r]
+           [inga.native-io :as io] [inga.native-prefix :as p]
+           [inga.native-live-test-keys :as k])
+ (:export [main]))
+(defn- hold [base :string] :i64
+ (let [ready (io/write (string-concat base "/ready") "ready")]
+  (if (not ready) -20 (loop [i 0] (if (= i 9223372036854775807) -21 (recur (+ i 1)))))))
+(defn- stage [base :string index :i64 point :i64] :i64
+ (let [context (k/context index) lock (string-concat base "/inga.lock")
+       pending (string-concat base "/inga.pending") final (string-concat base "/inga.state")]
+  (if (not (io/lock lock)) -30
+   (let [old (s/recover base context)
+         intent (r/prepare context old "propose|bafkreipublicrequest")
+         data (if (= point 0) "partial" (s/envelope context (record-get [:ref :inga.native/candidate] intent :state)))]
+    (cond (not (= (record-get [:ref :inga.native/candidate] intent :status) 1)) -31
+          (not (io/write pending data)) -32
+          (and (>= point 2) (not (io/sync pending))) -33
+          (and (>= point 3) (not (io/rename pending final))) -34
+          (and (>= point 4) (not (io/sync base))) -35
+          :else (hold base))))))
+(defn main [] :i64
+ (let [mode (typed-cap-call :cli/args :string :string "0")
+       base (typed-cap-call :cli/args :string :string "1")
+       index (p/number (typed-cap-call :cli/args :string :string "2"))]
+  (if (or (= base "") (< index 0) (> index 3)) -1
+   (cond
+    (= mode "hold") (if (io/lock (string-concat base "/inga.lock")) (hold base) -2)
+    (= mode "crash-partial") (stage base index 0)
+    (= mode "crash-written") (stage base index 1)
+    (= mode "crash-synced") (stage base index 2)
+    (= mode "crash-renamed") (stage base index 3)
+    (= mode "crash-durable") (stage base index 4)
+    (= mode "recover") (if (not (= (s/recover base (k/context index)) "")) 1 0)
+    :else
+    (let [event (cond (= mode "init") "init" (= mode "propose") "propose|bafkreipublicrequest"
+                      (= mode "equivocate") "propose|different-request" (= mode "state") "state"
+                      (= mode "event") (io/read (string-concat base "/request")) :else "invalid")
+          response (s/act base (k/context index) (k/seed (if (= mode "wrong-seed") (rem (+ index 1) 4) index)) event)
+          token (typed-cap-call :cli/args :string :string "3")
+          output (if (= token "") "/response" (string-concat "/response-" (str (p/number token))))]
+     (if (io/write (string-concat base output) response) 1 0))))))

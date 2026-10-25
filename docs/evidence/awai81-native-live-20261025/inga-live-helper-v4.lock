@@ -1,0 +1,12 @@
+KSL1
+entry /work/native-project/inga-test/inga/native_live_gate.kotoba
+root /work/native-project/src
+root /work/native-project/test
+root /work/native-project/providers
+root /work/native-project/inga
+root /work/native-project/inga-test
+file d7570c8a1a9174aa70db292cc5c8b73e592f41cec5c179e1e47d06de1ef78ee8 /work/native-project/inga-test/inga/native_live_fixture.kotoba
+file fb9e5d0cddcbe29f29656788dd6af17e61b3f09890627f22d579c3dcbf9e00f6 /work/native-project/inga-test/inga/native_live_gate.kotoba
+file c18e06ebd2d6dab5fac04158401a08b722aed0fe9520084a054315ee5e645c64 /work/native-project/inga/inga/native_prefix.kotoba
+file 47c086f3d93ad4f6da047bbf3b9250f7e4fbc7539ec1a0077abb2d82ceb3dc14 /work/native-project/providers/ed25519/selfhost.kotoba
+file 2c59ef55bc2b527c1aac723c0fee896eba75ee82fecd212a2858782beadc6888 /work/native-project/providers/sha2/core.kotoba

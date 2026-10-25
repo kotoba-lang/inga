@@ -1024,3 +1024,11 @@ and legacy v1 wire fields/CIDs remain compatible. See
 [whole-stack procedure](https://github.com/kotoba-lang/kotoba-lang/blob/main/docs/stack-refactor-procedure.md).
 The dependency update does not enable default v2 runtime admission or qualify
 new target/host/consistency combinations.
+
+## Native prefix candidate
+
+The [native finalized-prefix reader](docs/native-prefix.md) verifies hashes
+and real Ed25519 certificates in a bounded static-validator profile, including
+trusted-checkpoint fork refusal. Source-unity native gates do not qualify a
+live native consensus replica or durable publication; existing node runtimes
+remain unchanged.

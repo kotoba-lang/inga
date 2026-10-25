@@ -1,0 +1,1 @@
+{:ok true, :target :aarch64-macos, :output "/work/native-project/inga-vote-store-v4.kseed", :bytes 164639}

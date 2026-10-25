@@ -1,0 +1,14 @@
+;; PUBLIC RFC 8032 test material only. Never use these keys for a real chain.
+(ns inga.native-live-test-keys
+ (:require [ed25519.selfhost :as ed] [inga.native-prefix :as p] [inga.native-wire :as w])
+ (:export [context seed validators]))
+(defn seed [index :i64] :vector-i64
+ (ed/hex-bytes (cond (= index 0) "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+                    (= index 1) "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb"
+                    (= index 2) "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7"
+                    :else "f5e5767cf153319517630f226876b86c8160cc583bc013744c6bf255f5cc0ee5")))
+(defn validators [] :string
+ "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a,3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c,fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025,278117fc144c72340f67d0f2316e8386ceffbf2b2428c9c51fef7c597f1d426e")
+(defn context [index :i64] :string
+ (w/join "awai81-live-test|f39bbf598e79d13c484ac5cf0aaae2f978ec0ec4cc19d389b36f0ddbb2d4ce39"
+  "|" (w/join (validators) "|" (w/join "3" "|" (p/field (validators) 44 index)))))

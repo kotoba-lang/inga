@@ -1,0 +1,185 @@
+;; Experimental static-validator chained consensus. This module is pure:
+;; a candidate is an intent; the durable adapter must commit it before signing
+;; or releasing its response. The signing domain binds genesis and membership.
+(ns inga.native-replica
+ (:require [inga.native-prefix :as p] [inga.native-wire :as w] [inga.native-live-context :as c]
+           [inga.native-view-change :as v])
+ (:schemas {:inga.native/candidate [:record :inga.native/candidate
+   [[:status :i64] [:state :string] [:kind :i64] [:body :string]]]}))
+;; State v1: view|high-prefix-hex|high-QC-hex|locked-height|locked-view|locked-hash|
+;; committed-height|committed-hash|voted-view|voted-height|voted-hash|
+;; intent-prefix-hex|leader-signature-or-self|collected-votes|timeout-messages.
+(defn value [state :string index :i64] :string (p/field state 124 index))
+(defn num [state :string index :i64] :i64 (p/number (value state index)))
+(defn- set-value [state :string index :i64 data :string] :string
+ (loop [i 0 out ""] (if (= i 15) out
+                      (recur (+ i 1) (w/join out (if (= i 0) "" "|") (if (= i index) data (value state i)))))))
+(defn- set-num [state :string index :i64 number :i64] :string (set-value state index (str number)))
+(defn- prefix-to [prefix :string height :i64] :string
+ (loop [i 0 out ""] (if (> i height) out
+                      (recur (+ i 1) (w/join out (if (= i 0) "" "\n") (p/field prefix 10 i))))))
+(defn- tip [prefix :string] :string (p/field prefix 10 (- (p/fields prefix 10) 1)))
+(defn- block-view [block :string] :i64 (p/number (p/field block 124 5)))
+(defn initial [context :string] :string
+ (let [genesis (c/genesis context) anchor (c/anchor context)
+       high (w/ascii-hex genesis) qc (w/ascii-hex (w/join "0" ":" (string-concat anchor ":")))
+       a (w/join "1" "|" (w/join high "|" qc))
+       b (w/join a "|" (w/join "0|0" "|" anchor))
+       d (w/join b "|" (w/join "0" "|" anchor))
+       e (w/join d "|" (w/join "0|0" "|" anchor))]
+  (w/join e "|" (string-concat high "|||"))))
+(defn- checkpoint-in? [state :string prefix :string] :bool
+ (let [height (num state 6)]
+  (and (>= height 0) (< height (p/fields prefix 10))
+       (= (p/block-hash (p/field prefix 10 height)) (value state 7)))))
+(defn- vote-member [votes :string key :string] :string
+ (loop [i 0] (if (= i (p/fields votes 59)) ""
+               (let [vote (p/field votes 59 i)]
+                (if (= (p/field vote 44 0) key) vote (recur (+ i 1)))))))
+(defn- ordered-votes [context :string votes :string added :string] :string
+ (let [keys (c/validators context)]
+  (loop [i 0 out ""]
+   (if (= i (p/fields keys 44)) out
+    (let [key (p/field keys 44 i)
+          vote (if (= key (p/field added 44 0)) added (vote-member votes key))]
+     (recur (+ i 1) (if (= vote "") out (w/join out (if (= out "") "" ";") vote))))))))
+(defn- votes-valid? [context :string block :string votes :string] :bool
+ (and (<= (p/fields votes 59) (p/fields (c/validators context) 44))
+  (loop [i 0]
+   (if (= i (p/fields votes 59)) true
+    (let [vote (p/field votes 59 i) key (p/field vote 44 0)]
+     (and (p/live-vote-valid? (c/chain context) (c/validators context) block vote)
+          (loop [j 0] (if (= j i) true
+                       (and (not (= key (p/field (p/field votes 59 j) 44 0))) (recur (+ j 1)))))
+          (recur (+ i 1))))))))
+(defn valid-state? [context :string state :string] :bool
+ (and (c/valid? context) (<= (string-length state) 4194304) (= (p/fields state 124) 15)
+  (loop [i 0]
+   (if (= i 15) true
+    (and (if (or (= i 0) (= i 3) (= i 4) (= i 6) (= i 8) (= i 9))
+           (and (>= (num state i) 0) (= (str (num state i)) (value state i))) true) (recur (+ i 1)))))
+  (> (num state 0) 0) (<= (num state 8) (num state 0))
+  (w/sized-hex? (value state 5) 64) (w/sized-hex? (value state 7) 64) (w/sized-hex? (value state 10) 64)
+  (w/ascii-hex? (value state 1)) (w/ascii-hex? (value state 2)) (w/ascii-hex? (value state 11))
+  (let [high (w/text (value state 1)) qc (w/text (value state 2))
+        height (p/live-verify-certified-chain (c/chain context) (c/anchor context) (c/validators context) (c/quorum context) high qc)
+        intent (w/text (value state 11)) block (tip intent)]
+   (and (>= height 0) (checkpoint-in? state high) (<= (num state 3) 63)
+        (if (= (num state 3) 0) (and (= (num state 4) 0) (= (value state 5) (c/anchor context))) (> (num state 4) 0))
+        (<= (num state 4) (block-view (tip high)))
+        (if (= (num state 8) 0)
+          (and (= (num state 9) 0) (= (value state 10) (c/anchor context))
+               (= intent (c/genesis context)) (= (value state 12) "") (= (value state 13) ""))
+          (and (= (p/live-verify-chain (c/chain context) (c/anchor context) (c/validators context) (c/quorum context) intent) (num state 9))
+               (= (block-view block) (num state 8)) (= (p/block-hash block) (value state 10))
+               (if (= (value state 12) "self") (= (p/field block 124 3) (c/witness context))
+                 (c/proposal-valid? context intent (value state 12)))
+               (votes-valid? context block (value state 13))))
+        (or (= (value state 14) "")
+            (and (v/valid-set? context (value state 14))
+                 (>= (v/view (p/field (value state 14) 59 0)) (num state 0))))))))
+(defn- refused [state :string reason :string] [:ref :inga.native/candidate]
+ (record-new [:ref :inga.native/candidate] 0 state 0 reason))
+(defn- accepted [state :string kind :i64 body :string] [:ref :inga.native/candidate]
+ (record-new [:ref :inga.native/candidate] 1 state kind body))
+(defn- learn [context :string state :string prefix :string qc :string] :string
+ (let [height (p/live-verify-certified-chain (c/chain context) (c/anchor context) (c/validators context) (c/quorum context) prefix qc)]
+  (if (or (< height 0) (not (checkpoint-in? state prefix))) ""
+   (let [block (tip prefix) view (block-view block) old (block-view (tip (w/text (value state 1))))]
+    (cond (>= view 9007199254740991) ""
+          (< view old) state
+          (= view old) (if (= (p/block-hash block) (p/block-hash (tip (w/text (value state 1))))) state "")
+          :else
+          (let [base (set-value (set-value (set-value state 1 (w/ascii-hex prefix)) 2 (w/ascii-hex qc)) 14 "")
+                next (set-num base 0 (if (> (+ view 1) (num state 0)) (+ view 1) (num state 0)))
+                locked-height (if (>= height 2) (- height 1) 0)
+                locked-block (p/field prefix 10 locked-height)
+                locked-view (block-view locked-block)
+                locked (if (> locked-view (num state 4))
+                         (set-value (set-num (set-num next 3 locked-height) 4 locked-view) 5 (p/block-hash locked-block)) next)
+                committed (if (>= height 3) (- height 2) 0)]
+           (if (> committed (num state 6))
+            (set-value (set-num locked 6 committed) 7 (p/block-hash (p/field prefix 10 committed))) locked)))))))
+(defn- prepare-vote [context :string state :string prefix :string signature :string self :bool] [:ref :inga.native/candidate]
+ (let [height (p/live-verify-chain (c/chain context) (c/anchor context) (c/validators context) (c/quorum context) prefix)
+       block (tip prefix) view (block-view block) hash (p/block-hash block)]
+  (cond
+   (or (< height 1) (not (checkpoint-in? state prefix))
+       (if self (not (= (p/field block 124 3) (c/witness context))) (not (c/proposal-valid? context prefix signature)))) (refused state "rejected:proposal")
+   (= view (num state 8)) (if (and (= hash (value state 10)) (= height (num state 9)))
+                          (accepted state (if self 2 1) "retry") (refused state "rejected:equivocation"))
+   (< view (num state 8)) (refused state "rejected:stale-vote")
+   :else
+   (let [known (learn context state (prefix-to prefix (- height 1)) (p/field block 124 6))]
+    (if (or (= known "") (not (= view (num known 0))) (>= view 9007199254740991)) (refused state "rejected:view")
+     (let [extends (and (< (num known 3) (p/fields prefix 10))
+                        (= (p/block-hash (p/field prefix 10 (num known 3))) (value known 5)))
+           justify-view (block-view (p/field prefix 10 (- height 1)))]
+      (if (not (or extends (> justify-view (num known 4)))) (refused state "rejected:locked")
+       (let [intent (set-value (set-num (set-num known 8 view) 9 height) 10 hash)
+             proof (set-value (set-value intent 11 (w/ascii-hex prefix)) 12 (if self "self" signature))]
+        (accepted (set-value proof 13 "") (if self 2 1) "fresh")))))))))
+(defn- proposal-ids? [csv :string] :bool
+ (and (<= (p/fields csv 44) 64)
+  (loop [i 0] (if (= i (p/fields csv 44)) true
+               (and (w/token? (p/field csv 44 i)) (recur (+ i 1)))))))
+(defn- propose [context :string state :string ids :string] [:ref :inga.native/candidate]
+ (let [view (num state 0) high (w/text (value state 1)) parent (tip high) height (p/fields high 10)]
+  (if (or (not (= (c/leader context view) (c/witness context))) (not (proposal-ids? ids)) (>= height 64))
+   (refused state "rejected:leader-or-bounds")
+   (let [b0 (w/join (str height) "|" (p/block-hash parent))
+         b1 (w/join b0 "|" ids) b2 (w/join b1 "|" (c/witness context))
+         b3 (w/join b2 "|" (str view)) b4 (w/join b3 "|" (str view))
+         block (w/join b4 "|" (w/text (value state 2))) prefix (w/join high "\n" block)]
+    (prepare-vote context state prefix "" true)))))
+(defn- collect [context :string state :string vote :string] [:ref :inga.native/candidate]
+ (let [prefix (w/text (value state 11)) block (tip prefix)]
+  (if (or (= (num state 8) 0) (not (= (p/field block 124 3) (c/witness context)))
+          (not (p/live-vote-valid? (c/chain context) (c/validators context) block vote))) (refused state "rejected:vote")
+   (let [old (value state 13) previous (vote-member old (p/field vote 44 0))
+         votes (if (= previous "") (ordered-votes context old vote) old)
+         updated (set-value state 13 votes)]
+    (if (< (p/fields votes 59) (c/quorum context)) (accepted updated 4 "accepted:vote")
+     (let [qc (w/join (p/field block 124 0) ":" (w/join (p/block-hash block) ":" votes))
+           known (learn context updated prefix qc)]
+      (if (= known "") (refused state "rejected:certificate")
+       (accepted known 3 (w/join (w/ascii-hex prefix) "|" (w/ascii-hex qc))))))))))
+(defn- adopt-timeout [context :string state :string messages :string] [:ref :inga.native/candidate]
+ (if (not (v/certificate? context messages)) (refused state "rejected:timeout-certificate")
+  (let [round (v/view (p/field messages 59 0))]
+   (if (< round (num state 0)) (accepted state 4 "ignored:stale-timeout")
+    (let [best (v/best messages) prefix (v/high-prefix best) qc (v/high-qc best)
+          old-view (block-view (tip (w/text (value state 1))))
+          known (if (< (v/high-view best) old-view) state (learn context state prefix qc))]
+     (if (= known "") (refused state "rejected:timeout-checkpoint")
+      (accepted (set-value (set-num known 0 (+ round 1)) 14 "") 4 "accepted:timeout-certificate")))))))
+(defn- collect-timeout [context :string state :string message :string] [:ref :inga.native/candidate]
+ (cond
+  (not (v/valid-message? context message)) (refused state "rejected:new-view")
+  (< (v/view message) (num state 0)) (accepted state 4 "ignored:stale-new-view")
+  :else
+  (let [old (value state 14) old-view (if (= old "") 0 (v/view (p/field old 59 0)))
+        round (v/view message)]
+   (if (< round old-view) (accepted state 4 "ignored:older-new-view")
+    (let [messages (v/insert context (if (> round old-view) "" old) message)
+          updated (set-value state 14 messages)]
+     (if (< (p/fields messages 59) (c/quorum context)) (accepted updated 4 "accepted:new-view")
+      (let [adopted (adopt-timeout context updated messages)]
+       (if (= (record-get [:ref :inga.native/candidate] adopted :status) 0) adopted
+        (accepted (record-get [:ref :inga.native/candidate] adopted :state) 6 (w/ascii-hex messages))))))))))
+(defn prepare [context :string state :string event :string] [:ref :inga.native/candidate]
+ (if (or (not (valid-state? context state)) (> (string-length event) 4194304)) (refused state "rejected:state-or-bounds")
+  (let [method (p/field event 124 0)]
+   (cond
+    (= event "timeout") (if (>= (num state 0) 9007199254740991) (refused state "rejected:view-bound") (accepted state 5 "timeout-intent"))
+    (and (= method "new-view") (= (p/fields event 124) 2)) (collect-timeout context state (p/field event 124 1))
+    (and (= method "tc") (= (p/fields event 124) 2) (w/ascii-hex? (p/field event 124 1)))
+    (adopt-timeout context state (w/text (p/field event 124 1)))
+    (and (= method "propose") (= (p/fields event 124) 2)) (propose context state (p/field event 124 1))
+    (and (= method "proposal") (= (p/fields event 124) 3) (w/ascii-hex? (p/field event 124 1)))
+    (prepare-vote context state (w/text (p/field event 124 1)) (p/field event 124 2) false)
+    (and (= method "vote") (= (p/fields event 124) 2)) (collect context state (p/field event 124 1))
+    (and (= method "qc") (= (p/fields event 124) 3) (w/ascii-hex? (p/field event 124 1)) (w/ascii-hex? (p/field event 124 2)))
+    (let [next (learn context state (w/text (p/field event 124 1)) (w/text (p/field event 124 2)))]
+     (if (= next "") (refused state "rejected:proof-or-checkpoint") (accepted next 4 "accepted:qc")))
+    :else (refused state "rejected:method")))))

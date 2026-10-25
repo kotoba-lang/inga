@@ -1,0 +1,72 @@
+;; Durable signer boundary. No signature is computed before pending write,
+;; file fsync, atomic rename and directory fsync have all succeeded.
+(ns inga.native-vote-store
+ (:require [inga.native-prefix :as p] [inga.native-wire :as w]
+           [inga.native-live-context :as c] [inga.native-replica :as r]
+           [inga.native-io :as io] [inga.native-view-change :as v] [ed25519.selfhost :as ed]))
+(defn envelope [context :string state :string] :string
+ (let [body (w/join "INGA-NATIVE-VOTE-STATE-V1" "\n" (w/join (w/hash context) "\n" (w/ascii-hex state)))]
+  (w/join body "\n" (w/hash body))))
+(defn decode [context :string data :string] :string
+ (if (or (> (string-length data) 8500000) (not (= (p/fields data 10) 4))
+         (not (= (p/field data 10 0) "INGA-NATIVE-VOTE-STATE-V1"))
+         (not (= (p/field data 10 1) (w/hash context)))
+         (not (w/ascii-hex? (p/field data 10 2)))) ""
+  (let [body (w/join (p/field data 10 0) "\n" (w/join (p/field data 10 1) "\n" (p/field data 10 2)))
+        state (w/text (p/field data 10 2))]
+   (if (and (= (w/hash body) (p/field data 10 3)) (r/valid-state? context state)) state ""))))
+(defn- monotone? [old :string next :string] :bool
+ (and (>= (r/num next 8) (r/num old 8)) (>= (r/num next 4) (r/num old 4))
+      (>= (r/num next 6) (r/num old 6)) (>= (r/num next 0) (r/num old 0))
+      (or (not (= (r/num next 8) (r/num old 8)))
+          (and (= (r/value next 10) (r/value old 10)) (= (r/num next 9) (r/num old 9))))
+      (or (not (= (r/num next 6) (r/num old 6))) (= (r/value next 7) (r/value old 7)))))
+(defn- persist [base :string context :string old :string next :string] :string
+ (let [pending (string-concat base "/inga.pending") final (string-concat base "/inga.state")
+       data (envelope context next)]
+  (cond (or (not (monotone? old next)) (not (r/valid-state? context next))) "rejected:candidate"
+        (not (io/write pending data)) "rejected:write"
+        (not (io/sync pending)) "rejected:file-sync"
+        (not (io/rename pending final)) "uncertain:rename"
+        (not (io/sync base)) "uncertain:directory-sync"
+        :else "durable")))
+(defn- signed-response [context :string seed :vector-i64 state :string kind :i64 body :string] :string
+ (cond
+  (or (= kind 1) (= kind 2))
+  (let [prefix (w/text (r/value state 11)) block (p/field prefix 10 (r/num state 9))
+        signature (w/hex (ed/sign seed (w/bytes (p/live-vote-payload (c/chain context) block (c/witness context)))))
+        vote (w/join (c/witness context) "," (w/join (str (r/num state 8)) "," signature))]
+   (if (= kind 1) (w/join "vote" "|" vote)
+    (let [proposal-signature (w/hex (ed/sign seed (w/bytes (p/live-proposal-payload (c/chain context) block))))]
+     (w/join "proposal" "|" (w/join (r/value state 11) "|" (w/join proposal-signature "|" vote))))))
+  (= kind 3) (w/join "qc" "|" body)
+  (= kind 5) (w/join "new-view" "|" (v/signed-message context seed (r/num state 0) (w/text (r/value state 1)) (w/text (r/value state 2))))
+  (= kind 6) (w/join "tc" "|" body)
+  :else body))
+(defn recover [base :string context :string] :string
+ (if (or (not (io/safe-base? base)) (not (c/valid? context))) ""
+  (let [path (string-concat base "/inga.state")]
+   (if (not (io/exists? path)) "" (decode context (io/read path))))))
+(defn act [base :string context :string seed :vector-i64 event :string] :string
+ (if (or (not (io/safe-base? base)) (not (c/key-matches? context seed))) "rejected:context-or-key"
+  (let [lock (string-concat base "/inga.lock") final (string-concat base "/inga.state")]
+   (if (not (io/lock lock)) "rejected:busy"
+    (let [present (io/exists? final) old (if present (decode context (io/read final)) (r/initial context))
+          result
+          (if (= old "") "rejected:corrupt"
+           (let [candidate
+                 (cond (= event "init") (record-new [:ref :inga.native/candidate] 1 old 4 "ready")
+                       (= event "state") (record-new [:ref :inga.native/candidate] 1 old 4
+                         (w/join "state" "|" (w/join (str (r/num old 0)) "|"
+                           (w/join (str (r/num old 8)) "|" (w/join (str (r/num old 6)) "|" (r/value old 7))))))
+                       (= event "sync") (record-new [:ref :inga.native/candidate] 1 old 3 (w/join (r/value old 1) "|" (r/value old 2)))
+                       :else (r/prepare context old event))]
+            (if (= (record-get [:ref :inga.native/candidate] candidate :status) 0)
+             (record-get [:ref :inga.native/candidate] candidate :body)
+             (let [next (record-get [:ref :inga.native/candidate] candidate :state)
+                   stored (persist base context old next)]
+              (if (not (= stored "durable")) stored
+               (signed-response context seed next (record-get [:ref :inga.native/candidate] candidate :kind)
+                 (record-get [:ref :inga.native/candidate] candidate :body)))))))
+          released (io/unlock lock)]
+     (if released result "uncertain:unlock"))))))
