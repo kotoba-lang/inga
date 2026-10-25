@@ -4,7 +4,9 @@
 (ns inga.native-prefix
   (:require [ed25519.selfhost :as ed]
             [sha2.core :as sha])
-  (:export [field fields number canonical-block block-hash verify-prefix verify-extension]))
+  (:export [field fields number canonical-block block-hash verify-prefix verify-extension
+            live-context? live-certificate? live-verify-chain live-verify-certified-chain
+            live-vote-valid? live-vote-payload live-proposal-payload]))
 
 ;; Wire v1 is a lossless restricted adapter for the existing Inga strings:
 ;; block = height|parent|proposals CSV|proposer|timestamp|round|parent QC
@@ -174,3 +176,62 @@
       (if (or (not (= (fields checkpoint 58) 2)) (< old 0) (> old height)
               (not (np-hex? hash 64))
               (not (= (block-hash (field prefix 10 old)) hash))) -8 height))))
+
+;; The live static-validator profile is stricter than the historical reader:
+;; all votes for a live block name that block's round. Mixed-view historical
+;; certificates remain readable by verify-prefix; they do not authorize a
+;; live round transition. Membership and quorum still come from trusted input.
+(defn live-context? [chain :string trusted-genesis :string validators :string quorum :i64] :bool
+ (let [n (fields validators 44) minimum (quot (+ n (quot (- n 1) 3) 2) 2)]
+  (and (np-token? chain) (np-hex? trusted-genesis 64) (np-validators? validators)
+       (>= quorum minimum) (<= quorum n))))
+(defn live-vote-payload [chain :string block :string witness :string] :string
+ (np-payload chain (field block 124 0) (block-hash block)
+   (string-concat witness (string-concat "," (string-concat (field block 124 5) ",")))))
+(defn live-vote-valid? [chain :string validators :string block :string vote :string] :bool
+ (let [witness (field vote 44 0)]
+  (and (np-token? chain) (np-validators? validators) (np-block? block)
+       (= (fields vote 44) 3) (np-member? validators witness)
+       (= (field vote 44 1) (field block 124 5)) (np-hex? (field vote 44 2) 128)
+       (ed/verify? (ed/hex-bytes witness) (np-bytes (live-vote-payload chain block witness))
+                   (ed/hex-bytes (field vote 44 2))))))
+(defn live-certificate? [chain :string validators :string quorum :i64 block :string qc :string] :bool
+ (let [n (fields validators 44) minimum (quot (+ n (quot (- n 1) 3) 2) 2)
+       votes (field qc 58 2)]
+  (and (np-token? chain) (np-validators? validators) (np-block? block)
+       (>= quorum minimum) (<= quorum n)
+       (np-certificate? chain validators quorum qc (field block 124 0) (block-hash block))
+       (loop [i 0]
+        (if (= i (fields votes 59)) true
+         (and (= (field (field votes 59 i) 44 1) (field block 124 5)) (recur (+ i 1))))))))
+(defn live-proposal-payload [chain :string block :string] :string
+ (string-concat "engi/native-proposal/v1\nchain="
+  (string-concat chain (string-concat "\nblock=" (string-concat (block-hash block) "\n")))))
+(defn live-verify-chain [chain :string trusted-genesis :string validators :string quorum :i64 prefix :string] :i64
+ (let [n (fields prefix 10) nv (fields validators 44)]
+  (cond
+   (not (live-context? chain trusted-genesis validators quorum)) -1
+   (or (< n 1) (> n 64) (> (string-length prefix) 1048576)) -2
+   :else
+   (let [genesis (field prefix 10 0)]
+    (if (or (not (np-block? genesis)) (not (= (field genesis 124 0) "0"))
+            (not (= (field genesis 124 1) "genesis")) (not (= (field genesis 124 2) ""))
+            (not (= (field genesis 124 6) "")) (not (= (block-hash genesis) trusted-genesis))) -3
+     (loop [i 1 previous genesis]
+      (if (= i n) (- n 1)
+       (let [block (field prefix 10 i) parent (block-hash previous)
+             round (number (field block 124 5)) qc (field block 124 6)]
+        (cond
+         (not (np-block? block)) -2
+         (or (not (= (number (field block 124 0)) i)) (not (= (field block 124 1) parent))) -4
+         (or (<= round (number (field previous 124 5)))
+             (not (= (field block 124 3) (field validators 44 (rem round nv))))) -5
+         (if (= i 1) (not (= qc (string-concat "0:" (string-concat parent ":"))))
+           (not (live-certificate? chain validators quorum previous qc))) -6
+         :else (recur (+ i 1) block))))))))))
+(defn live-verify-certified-chain [chain :string trusted-genesis :string validators :string quorum :i64
+                                  prefix :string tip-qc :string] :i64
+ (let [height (live-verify-chain chain trusted-genesis validators quorum prefix)]
+  (if (< height 0) height
+   (if (if (= height 0) (= tip-qc (string-concat "0:" (string-concat trusted-genesis ":")))
+          (live-certificate? chain validators quorum (field prefix 10 height) tip-qc)) height -7))))

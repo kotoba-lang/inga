@@ -56,3 +56,10 @@ and a private import are refused. See the new
 The preceding source-unity evidence remains the historical baseline. Live
 replicas, durable signing/checkpoints, crash recovery and production finality
 remain unqualified.
+
+## Native voting follow-on
+
+The bounded native voting, durable signer and local TCP fault gates are now
+recorded separately in [native-live.md](native-live.md). They use actual
+signatures and preserve the historical reader behavior described above. The
+older source-unity/linked receipts do not establish those later results.

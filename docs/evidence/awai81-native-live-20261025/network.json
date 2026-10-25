@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "replicas": 4,
+  "quorum": 3,
+  "offlineScheduledLeader": 0,
+  "view4SkippedWithNativeTC": true,
+  "postTimeoutQCView": 5,
+  "restartCatchUp": {
+    "0": "state|6|3|2|4e92a54c1c57447c5aeca3f530340e515849e693e7a982fd5bdd0ff6068c0c46",
+    "1": "state|6|5|2|4e92a54c1c57447c5aeca3f530340e515849e693e7a982fd5bdd0ff6068c0c46",
+    "2": "state|6|5|2|4e92a54c1c57447c5aeca3f530340e515849e693e7a982fd5bdd0ff6068c0c46",
+    "3": "state|6|5|2|4e92a54c1c57447c5aeca3f530340e515849e693e7a982fd5bdd0ff6068c0c46"
+  },
+  "actualSignedEquivocationRefusals": {
+    "0": "rejected:view",
+    "1": "rejected:equivocation",
+    "2": "rejected:equivocation",
+    "3": "rejected:equivocation"
+  },
+  "duplicateOneWitnessNeverQC": true,
+  "transport": "host-loopback native TCP; bounded newline framing",
+  "artifactSha256": "bb2372c175a356c06e7b34c902b8475f3203f0cf68a78bd2dd6d59a31d8206c3",
+  "publicNetworkQualified": false
+}

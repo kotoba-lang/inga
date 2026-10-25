@@ -1,0 +1,37 @@
+;; Trusted static membership, bound into the chain's signing domain. A proof
+;; peer cannot choose the context, witness identity, quorum or signing key.
+(ns inga.native-live-context
+ (:require [inga.native-prefix :as p] [inga.native-wire :as w] [ed25519.selfhost :as ed]))
+;; base-chain|genesis-hash|ordered-public-keys-CSV|quorum|own-public-key
+(defn validators [context :string] :string (p/field context 124 2))
+(defn quorum [context :string] :i64 (p/number (p/field context 124 3)))
+(defn witness [context :string] :string (p/field context 124 4))
+(defn genesis [context :string] :string
+ (w/join "0|genesis|" "|" (string-concat (p/field (validators context) 44 0) "|0|0|")))
+(defn anchor [context :string] :string (p/field context 124 1))
+(defn chain [context :string] :string
+ (let [common (loop [i 0 out ""] (if (= i 4) out
+                                  (recur (+ i 1) (w/join out (if (= i 0) "" "|") (p/field context 124 i)))))]
+  (w/join (p/field context 124 0) "/native-v1/" (w/hash common))))
+(defn member? [context :string key :string] :bool
+ (let [keys (validators context)]
+  (loop [i 0] (if (= i (p/fields keys 44)) false
+               (if (= key (p/field keys 44 i)) true (recur (+ i 1)))))))
+(defn valid? [context :string] :bool
+ (and (<= (string-length context) 2200) (= (p/fields context 124) 5)
+      (w/token? (p/field context 124 0)) (<= (string-length (p/field context 124 0)) 40)
+      (p/live-context? (chain context) (anchor context) (validators context) (quorum context))
+      (= (str (quorum context)) (p/field context 124 3))
+      (= (p/block-hash (genesis context)) (anchor context))
+      (member? context (witness context))))
+(defn key-matches? [context :string seed :vector-i64] :bool
+ (and (valid? context) (= (vector-count seed) 32)
+      (= (w/hex (ed/public-from-seed seed)) (witness context))))
+(defn leader [context :string view :i64] :string
+ (p/field (validators context) 44 (rem view (p/fields (validators context) 44))))
+(defn proposal-valid? [context :string prefix :string signature :string] :bool
+ (let [height (p/live-verify-chain (chain context) (anchor context) (validators context) (quorum context) prefix)]
+  (and (> height 0) (w/sized-hex? signature 128)
+   (let [block (p/field prefix 10 height)]
+    (ed/verify? (ed/hex-bytes (p/field block 124 3)) (w/bytes (p/live-proposal-payload (chain context) block))
+                (ed/hex-bytes signature))))))

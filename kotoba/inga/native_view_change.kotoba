@@ -1,0 +1,63 @@
+;; Signed new-view messages, with independently verified high-QC ancestry.
+;; No caller-supplied verification flags or unauthenticated quorum counts.
+(ns inga.native-view-change
+ (:require [inga.native-prefix :as p] [inga.native-live-context :as c]
+           [inga.native-wire :as w] [ed25519.selfhost :as ed]))
+;; witness,view,high-prefix-hex,high-QC-hex,signature
+(defn view [message :string] :i64 (p/number (p/field message 44 1)))
+(defn high-prefix [message :string] :string (w/text (p/field message 44 2)))
+(defn high-qc [message :string] :string (w/text (p/field message 44 3)))
+(defn high-view [message :string] :i64
+ (let [prefix (high-prefix message)] (p/number (p/field (p/field prefix 10 (- (p/fields prefix 10) 1)) 124 5))))
+(defn payload [context :string round :i64 witness :string prefix :string] :string
+ (let [height (- (p/fields prefix 10) 1) block (p/field prefix 10 height)
+       a (w/join "engi/new-view/v1\nchain=" "" (c/chain context))
+       b (w/join a "\nview=" (str round)) d (w/join b "\nwitness=" witness)
+       e (w/join d "\nhigh-block=" (p/block-hash block))
+       f (w/join e "\nhigh-height=" (str height))
+       g (w/join f "\nhigh-view=" (p/field block 124 5))]
+  (string-concat g "\n")))
+(defn signed-message [context :string seed :vector-i64 round :i64 prefix :string qc :string] :string
+ (let [sig (w/hex (ed/sign seed (w/bytes (payload context round (c/witness context) prefix))))
+       a (w/join (c/witness context) "," (str round))
+       b (w/join a "," (w/ascii-hex prefix)) d (w/join b "," (w/ascii-hex qc))]
+  (w/join d "," sig)))
+(defn valid-message? [context :string message :string] :bool
+ (and (<= (string-length message) 4194304) (= (p/fields message 44) 5)
+      (c/member? context (p/field message 44 0)) (> (view message) 0) (< (view message) 9007199254740991)
+      (= (str (view message)) (p/field message 44 1))
+      (w/ascii-hex? (p/field message 44 2)) (w/ascii-hex? (p/field message 44 3))
+      (w/sized-hex? (p/field message 44 4) 128)
+      (let [prefix (high-prefix message) qc (high-qc message)
+            height (p/live-verify-certified-chain (c/chain context) (c/anchor context) (c/validators context) (c/quorum context) prefix qc)]
+       (and (>= height 0) (< (high-view message) (view message))
+        (ed/verify? (ed/hex-bytes (p/field message 44 0))
+          (w/bytes (payload context (view message) (p/field message 44 0) prefix))
+          (ed/hex-bytes (p/field message 44 4)))))))
+(defn valid-set? [context :string messages :string] :bool
+ (and (<= (p/fields messages 59) (p/fields (c/validators context) 44))
+  (loop [i 0]
+   (if (= i (p/fields messages 59)) true
+    (let [message (p/field messages 59 i) witness (p/field message 44 0)]
+     (and (valid-message? context message) (= (view message) (view (p/field messages 59 0)))
+          (loop [j 0] (if (= j i) true
+                       (and (not (= witness (p/field (p/field messages 59 j) 44 0))) (recur (+ j 1)))))
+          (recur (+ i 1))))))))
+(defn certificate? [context :string messages :string] :bool
+ (and (>= (p/fields messages 59) (c/quorum context)) (valid-set? context messages)))
+(defn- find-message [messages :string witness :string] :string
+ (loop [i 0] (if (= i (p/fields messages 59)) ""
+               (let [message (p/field messages 59 i)]
+                (if (= (p/field message 44 0) witness) message (recur (+ i 1)))))))
+(defn insert [context :string messages :string message :string] :string
+ (let [keys (c/validators context) previous (find-message messages (p/field message 44 0))
+       chosen (if (or (= previous "") (> (high-view message) (high-view previous))) message previous)]
+  (loop [i 0 out ""]
+   (if (= i (p/fields keys 44)) out
+    (let [key (p/field keys 44 i) current (if (= key (p/field chosen 44 0)) chosen (find-message messages key))]
+     (recur (+ i 1) (if (= current "") out (w/join out (if (= out "") "" ";") current))))))))
+(defn best [messages :string] :string
+ (loop [i 0 highest ""]
+  (if (= i (p/fields messages 59)) highest
+   (let [message (p/field messages 59 i)]
+    (recur (+ i 1) (if (or (= highest "") (> (high-view message) (high-view highest))) message highest))))))

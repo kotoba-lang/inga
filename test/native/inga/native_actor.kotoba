@@ -1,0 +1,30 @@
+;; Long-running native actor for the scoped ASCII TCP transport gate. The
+;; host routes opaque protocol messages; it neither signs nor forms QCs.
+(ns inga.native-actor
+ (:require [inga.native-vote-store :as s] [inga.native-io :as io]
+           [inga.native-prefix :as p] [inga.native-wire :as w]
+           [inga.native-live-test-keys :as k] [inga.native-transport :as net])
+ (:export [main]))
+(defn main [] :i64
+ (let [base (typed-cap-call :cli/args :string :string "0")
+       index (p/number (typed-cap-call :cli/args :string :string "1"))
+       run-text (typed-cap-call :cli/args :string :string "2") run (p/number run-text)]
+  (if (or (not (io/safe-base? base)) (< index 0) (> index 3) (< run 1) (not (= run-text (str run)))) -1
+   (let [context (k/context index) seed (k/seed index)
+         listener (net/listen (typed-cap-call :cli/args :string :string "3"))
+         ready (arena-scope
+                (let [response (s/act base context seed "init")
+                      written (io/write (w/join base "/ready-" run-text) response)]
+                 (if (and written (= response "ready")) 1 0)))]
+    (if (= ready 0) -2
+     (loop [sequence 0]
+      (let [result (arena-scope
+                    (let [connection (net/accept listener)]
+                     (if (= connection "timeout") 1
+                      (let [event (net/receive connection) stopping (= event "stop")
+                            trace-in (io/write (w/join base "/last-event" "") event)
+                            response (if stopping "stopped" (s/act base context seed event))
+                            trace-out (io/write (w/join base "/last-response" "") response)
+                            replied (net/reply connection response) closed (net/close connection)]
+                       (if (and replied (= closed "closed")) (if stopping 0 1) 1)))))]
+       (if (= result 1) (recur (+ sequence 1)) result))))))))

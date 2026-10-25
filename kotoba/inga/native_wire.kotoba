@@ -1,0 +1,36 @@
+;; Restricted ASCII wire helpers. They grant no transport or storage access.
+(ns inga.native-wire
+ (:require [ed25519.selfhost :as ed] [sha2.core :as sha]))
+(defn bytes [text :string] :vector-i64
+ (let [out (vector-alloc (string-length text))]
+  (loop [i 0] (if (= i (string-length text)) out
+               (let [z (vector-assoc! out i (string-code-point-at text i))] (recur (+ i 1)))))))
+(defn hex? [text :string] :bool
+ (and (= (rem (string-length text) 2) 0)
+  (loop [i 0] (if (= i (string-length text)) true
+               (let [c (string-code-point-at text i)]
+                (and (or (and (>= c 48) (<= c 57)) (and (>= c 97) (<= c 102))) (recur (+ i 1))))))))
+(defn sized-hex? [text :string size :i64] :bool (and (= (string-length text) size) (hex? text)))
+(defn hex [input :vector-i64] :string
+ (let [alphabet "0123456789abcdef" out (vector-alloc (* 2 (vector-count input)))]
+  (loop [i 0]
+   (if (= i (vector-count input)) (string-from-utf8 (bytes-from-vector-i64 out))
+    (let [value (vector-at input i)
+          a (vector-assoc! out (* 2 i) (string-code-point-at alphabet (quot value 16)))
+          z (vector-assoc! out (+ (* 2 i) 1) (string-code-point-at alphabet (rem value 16)))] (recur (+ i 1)))))))
+(defn ascii-hex [text :string] :string (hex (bytes text)))
+(defn ascii-hex? [text :string] :bool
+ (and (hex? text)
+  (loop [i 0] (if (= i (string-length text)) true
+               (and (< (string-code-point-at text i) 56) (recur (+ i 2)))))))
+(defn text [hex :string] :string
+ (if (not (ascii-hex? hex)) "" (string-from-utf8 (bytes-from-vector-i64 (ed/hex-bytes hex)))))
+(defn hash [text :string] :string (sha/sha256-hex (bytes text)))
+(defn join [a :string delimiter :string b :string] :string (string-concat a (string-concat delimiter b)))
+(defn token? [text :string] :bool
+ (and (> (string-length text) 0) (<= (string-length text) 128)
+  (loop [i 0] (if (= i (string-length text)) true
+               (let [c (string-code-point-at text i)]
+                (and (or (and (>= c 48) (<= c 57)) (and (>= c 65) (<= c 90))
+                         (and (>= c 97) (<= c 122)) (= c 45) (= c 46) (= c 95) (= c 47))
+                     (recur (+ i 1))))))))
