@@ -571,7 +571,7 @@ chain. A host must persist the new snapshot before sending its vote.
 the property directly — every block the replica holds is offered back to it and
 every vote that leaves is checked against the block it actually adopted.
 
-`script/test-vote-watermark.cljk` checks the final signing gate with real
+`test-vote-watermark` (in kotoba `lib/kotoba.ingaCore`) checks the final signing gate with real
 Ed25519 signatures: alternate-tip sync and restart cannot produce conflicting
 same-view votes; a cached vote is resent unchanged; a later view can vote;
 a conflicting locked tip is refused.
@@ -820,7 +820,7 @@ An equivocating quorum can sign two incompatible histories; the qualification
 test explicitly demonstrates that limit instead of interpreting signatures as
 proof of operational honesty. Dynamic validator changes are not qualified.
 
-`script/test-reservation.cljk` runs the qualification tests on nbb with real
+`test-reservation` (in kotoba `lib/kotoba.ingaCore`) runs the qualification tests on nbb with real
 Ed25519 keys, real replica transitions and an in-memory partitionable
 transport. Supply `src`, `test`, inga-node's `src` (test crypto seams), text's
 `src`, and kotobase-storage's `src` on the classpath. This extends the existing
@@ -971,7 +971,7 @@ The synthetic suite compares first-wins, loser, unresolved-tail and malformed
 same-ref outcomes with the existing verifier over multiple segment widths,
 including boundaries of one block. It uses real Ed25519 signatures and raw
 CIDs, re-addressed semantic tampering, branch splices, missing/reordered/suffix
-inputs and resource limits. `script/test-reservation.cljk` now also needs the
+inputs and resource limits. `test-reservation` (in kotoba `lib/kotoba.ingaCore`) now also needs the
 archive test codec's dependencies (`inga-node/src`, `kotobase-client/src`,
 `sha2/src`, `text/src`, `kotobase-storage/src`) alongside `src` and `test`.
 The candidate itself adds no runtime dependencies.
